@@ -19,7 +19,7 @@ from pathlib import Path
 try:
     from config import (
         DISCORD_TOKEN, PREFIX, MAX_TOKENS, RESTART_DELAY,
-        MODEL_PATH, MODEL_NAME, DEBUG_MODE, BOT_STATUS,
+        MODEL_DIR, MODEL_NAME, DEBUG_MODE, BOT_STATUS,
         COMMAND_COOLDOWN, TRIVIA_TIMEOUT
     )
 except ImportError:
@@ -483,7 +483,7 @@ class RiddleView(View):
 print("Loading AI model...")
 llm = GPT4All(
     model_name=MODEL_NAME,
-    model_path=MODEL_PATH,
+    model_path=MODEL_DIR,
     allow_download=False
 )
 print("AI model loaded ✅")
