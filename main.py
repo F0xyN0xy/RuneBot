@@ -13,6 +13,7 @@ import aiohttp
 from typing import Optional
 import json
 import html
+from pathlib import Path
 
 # Import configuration from secure config file
 try:
@@ -26,6 +27,10 @@ except ImportError:
     print("Please create a .env file with your Discord token.")
     print("See .env.example for template.")
     exit(1)
+
+MODEL_DIR = Path("./models")
+MODEL_DIR.mkdir(exist_ok=True)
+model_path = MODEL_DIR
 
 # =========================================
 
