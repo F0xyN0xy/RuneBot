@@ -5,6 +5,7 @@ This file loads settings from environment variables or .env file
 
 import os
 from dotenv import load_dotenv
+from pathlib import Path
 
 # Load environment variables from .env file
 load_dotenv()
@@ -37,6 +38,11 @@ MODEL_NAME = os.getenv(
     'MODEL_NAME',
     "Llama-3.2-3B-Instruct-Q4_0.gguf"
 )
+
+MODEL_DIR = Path("./models")
+MODEL_DIR.mkdir(exist_ok=True)
+model_path = MODEL_DIR / "Llama-3.2-3B-Instruct-Q4_0.gguf"
+MODEL_DIR = Path("./models")  # points to /home/container/models
 
 # ============== OPTIONAL SETTINGS ==============
 
