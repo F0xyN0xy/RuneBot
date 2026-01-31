@@ -1,0 +1,120 @@
+# ========================================
+# DISCORD BOT - GITIGNORE
+# ========================================
+
+# ===== SENSITIVE FILES (NEVER COMMIT!) =====
+.env
+config.ini
+secrets.json
+*.key
+*.pem
+token.txt
+
+# Discord bot token files
+discord_token.txt
+bot_token.txt
+
+# ===== PYTHON =====
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Distribution / packaging
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual environments
+venv/
+env/
+ENV/
+.venv
+
+# ===== AI MODELS =====
+# GPT4All models (too large for GitHub)
+*.gguf
+*.bin
+models/
+*.model
+
+# ===== IDE / EDITOR =====
+# VSCode
+.vscode/
+*.code-workspace
+
+# PyCharm
+.idea/
+*.iml
+
+# Sublime Text
+*.sublime-project
+*.sublime-workspace
+
+# ===== OPERATING SYSTEM =====
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# Linux
+*~
+
+# ===== BOT DATA =====
+# Database files
+*.db
+*.sqlite
+*.sqlite3
+
+# Log files
+*.log
+logs/
+
+# Cache
+.cache/
+*.cache
+
+# Temporary files
+*.tmp
+temp/
+tmp/
+
+# User data
+user_data.json
+points.json
+stats.json
+
+# ===== MISC =====
+# Backup files
+*.bak
+*.swp
+*.swo
+*~
+
+# Test files (if you create tests)
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Documentation builds
+docs/_build/
