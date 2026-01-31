@@ -30,7 +30,7 @@ except ImportError:
 
 MODEL_DIR = Path("./models")
 MODEL_DIR.mkdir(exist_ok=True)
-model_path = MODEL_DIR
+model_path = MODEL_DIR / "Llama-3.2-3B-Instruct-Q4_0.gguf"
 
 # =========================================
 
