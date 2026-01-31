@@ -65,8 +65,8 @@ def validate_config():
     if not DISCORD_TOKEN:
         return False, "Discord token is missing"
     
-    if not os.path.exists(MODEL_PATH):
-        return False, f"Model path does not exist: {MODEL_PATH}"
+    if not os.path.exists(MODEL_DIR):
+        return False, f"Model path does not exist: {MODEL_DIR}"
     
     return True, "Configuration valid"
 
