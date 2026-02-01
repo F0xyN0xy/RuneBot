@@ -13,13 +13,14 @@ import aiohttp
 from typing import Optional
 import json
 import html
+import re
 from pathlib import Path
 
 # Import configuration from secure config file
 try:
     from config import (
         DISCORD_TOKEN, PREFIX, MAX_TOKENS, RESTART_DELAY,
-        MODEL_DIR, MODEL_NAME, DEBUG_MODE, BOT_STATUS,
+        MODEL_PATH, MODEL_NAME, DEBUG_MODE, BOT_STATUS,
         COMMAND_COOLDOWN, TRIVIA_TIMEOUT
     )
 except ImportError:
@@ -30,7 +31,7 @@ except ImportError:
 
 MODEL_DIR = Path("./models")
 MODEL_DIR.mkdir(exist_ok=True)
-model_path = MODEL_DIR / "Llama-3.2-3B-Instruct-Q4_0.gguf"
+model_path = MODEL_DIR / MODEL_NAME
 
 # =========================================
 
@@ -41,39 +42,54 @@ model_lock = asyncio.Lock()
 
 user_points = {}  # {user_id: points}
 active_trivia = {}  # {guild_id: {question, answer, answers, participants, message_id, created_at}}
-user_stats = {}  # {user_id: {commands_used, last_seen, trivia_correct, trivia_wrong}}
+user_stats = {}  # {user_id: {commands_used, last_seen, trivia_correct, trivia_wrong, joke_count}}
 reminders = []  # [{user_id, channel_id, message, time}]
 daily_claims = {}  # {user_id: last_claim_date}
 achievements = {}  # {user_id: [achievement_ids]}
 user_streaks = {}  # {user_id: {streak: int, last_answer_date: date}}
+trivia_streak = {}  # {user_id: streak_count}
 
 # ============== ACHIEVEMENTS ================
 
 ACHIEVEMENTS_LIST = {
     "first_blood": {"name": "🎯 First Blood", "desc": "Answer your first trivia question correctly", "points": 5},
     "trivia_master": {"name": "🧠 Trivia Master", "desc": "Answer 10 trivia questions correctly", "points": 50},
+    "trivia_legend": {"name": "👑 Trivia Legend", "desc": "Answer 50 trivia questions correctly", "points": 200},
     "quick_draw": {"name": "⚡ Quick Draw", "desc": "Answer a trivia question in under 5 seconds", "points": 25},
     "perfectionist": {"name": "💯 Perfectionist", "desc": "Get 5 correct answers in a row", "points": 100},
+    "unstoppable": {"name": "🔥 Unstoppable", "desc": "Get 10 correct answers in a row", "points": 250},
     "early_bird": {"name": "🌅 Early Bird", "desc": "Claim daily reward 7 days in a row", "points": 75},
+    "month_champion": {"name": "📅 Month Champion", "desc": "Claim daily reward 30 days in a row", "points": 300},
     "comedian": {"name": "😂 Comedian", "desc": "Use /joke 50 times", "points": 20},
     "social_butterfly": {"name": "🦋 Social Butterfly", "desc": "Use 100 commands total", "points": 50},
+    "power_user": {"name": "⚡ Power User", "desc": "Use 500 commands total", "points": 150},
     "dedicated": {"name": "🏆 Dedicated", "desc": "Reach 500 points", "points": 100},
+    "millionaire": {"name": "💰 Millionaire", "desc": "Reach 1000 points", "points": 200},
 }
 
-# ============== PROMPT ===================
+# ============== IMPROVED PROMPT ===================
 
-SYSTEM_PROMPT = (
-    "You are Rune, a helpful Discord bot.\n"
-    "Reply with ONE short, friendly message.\n"
-    "Do NOT create dialogue or invent user messages.\n"
-    "Stop immediately after your reply.\n"
-    "Reply in the same language as the user.\n"
-    "Be helpful, witty, and engaging.\n"
-)
+# Much better system prompt that prevents the AI from adding "end" or "assistant:"
+SYSTEM_PROMPT = """<|system|>
+You are Rune, a friendly and helpful Discord bot assistant.
+
+CRITICAL RULES:
+1. Reply with ONLY your direct response - no labels, no prefixes
+2. NEVER write "Assistant:", "User:", "Bot:", or similar labels
+3. NEVER write "end", "END", or any end markers
+4. Keep responses under 2 sentences unless asked for more
+5. Be conversational, warm, and helpful
+6. Match the user's language (English or German)
+7. Don't repeat the user's question back
+8. Do NOT continue an dialogue by yourself
+9. If you don't know the answer, say "I am not sure" or "I don't know"
+
+Your response should start immediately with your actual answer.
+<|end|>"""
 
 BAD_WORDS = [
-    "fuck", "shit", "idiot", "bitch",
-    "hurensohn", "arschloch"
+    "fuck", "shit", "idiot", "bitch", "ass",
+    "hurensohn", "arschloch", "scheiße"
 ]
 
 INAPPROPRIATE_PHRASES = [
@@ -82,16 +98,16 @@ INAPPROPRIATE_PHRASES = [
 ]
 
 ROASTS = [
-    "{target}, you just might be why the middle finger was invented.",
-    "{target}, if I were on a deserted island with you and a tin of corned beef, I'd rather eat you and talk to the corned beef.",
-    "I'd smack {target}, but I'm against animal abuse.",
-    "When I see {target} coming, I get pre-annoyed.",
-    "If I had a dollar every time {target} shut up, I would give it back as a thank you.",
-    "{target} is like a software update. Every time I see them, I think, 'Not now.'",
-    "A glowstick has a brighter future than {target}.",
-    "{target}'s so dense, light bends around them.",
-    "I've seen more life in a cemetery than in {target}'s personality.",
-    "{target}, you're the reason the gene pool needs a lifeguard."
+    "{target}, you're proof that evolution can go in reverse.",
+    "{target}, I'd agree with you, but then we'd both be wrong.",
+    "{target}, you bring everyone so much joy... when you leave the room.",
+    "{target}, I'd explain it to you, but I left my crayons at home.",
+    "{target}, you're not stupid; you just have bad luck thinking.",
+    "{target}, if laughter is the best medicine, your face must be curing the world.",
+    "{target}, I'm jealous of people who haven't met you yet.",
+    "{target}, you're like a cloud - when you disappear, it's a beautiful day.",
+    "{target}, somewhere out there is a tree tirelessly producing oxygen for you. Go apologize to it.",
+    "{target}, I'd challenge you to a battle of wits, but I see you came unarmed.",
 ]
 
 COMPLIMENTS = [
@@ -102,7 +118,9 @@ COMPLIMENTS = [
     "{target}, your smile is contagious! 😊",
     "{target}, you make the world a better place! 🌍",
     "{target}, you're absolutely amazing! 🎉",
-    "{target}, you're proof that good people exist! 💙"
+    "{target}, you're proof that good people exist! 💙",
+    "{target}, you have impeccable vibes! 🌈",
+    "{target}, you're someone I aspire to be like! 🚀"
 ]
 
 # ========== HELPER FUNCTIONS ==============
@@ -114,12 +132,44 @@ def is_inappropriate(text):
     return any(p in text.lower() for p in INAPPROPRIATE_PHRASES)
 
 def clean_output(text: str) -> str:
+    """
+    Improved cleaning function to remove AI artifacts
+    """
     if not text:
         return ""
-    text = text.split("\n")[0]
-    for forbidden in ["user:", "assistant:", "bot:"]:
-        if forbidden in text.lower():
-            text = text.lower().split(forbidden)[0]
+    
+    # Remove common AI patterns
+    text = text.strip()
+    
+    # Remove various end markers
+    end_markers = [
+        "end", "END", "<end>", "</end>",
+        "<|end|>", "<|endoftext|>", 
+        "assistant:", "Assistant:", "ASSISTANT:",
+        "user:", "User:", "USER:",
+        "bot:", "Bot:", "BOT:",
+        "<|assistant|>", "<|user|>"
+    ]
+    
+    for marker in end_markers:
+        # Case insensitive removal at the end
+        if text.lower().endswith(marker.lower()):
+            text = text[:-len(marker)].strip()
+        # Remove from anywhere in text
+        text = text.replace(marker, "")
+    
+    # Split by newlines and take only the first meaningful line
+    lines = [line.strip() for line in text.split('\n') if line.strip()]
+    if lines:
+        text = lines[0]
+    
+    # Remove any remaining special tokens
+    text = re.sub(r'<\|.*?\|>', '', text)
+    
+    # Remove quotes if the entire response is quoted
+    if text.startswith('"') and text.endswith('"'):
+        text = text[1:-1]
+    
     return text.strip()
 
 def add_points(user_id: int, points: int = 1):
@@ -129,19 +179,26 @@ def add_points(user_id: int, points: int = 1):
 def get_points(user_id: int) -> int:
     return user_points.get(user_id, 0)
 
-def track_user_activity(user_id: int):
+def track_user_activity(user_id: int, command_type: str = "general"):
     if user_id not in user_stats:
         user_stats[user_id] = {
             "commands_used": 0, 
             "last_seen": datetime.now(),
             "trivia_correct": 0,
-            "trivia_wrong": 0
+            "trivia_wrong": 0,
+            "joke_count": 0
         }
     user_stats[user_id]["commands_used"] += 1
     user_stats[user_id]["last_seen"] = datetime.now()
+    
+    if command_type == "joke":
+        user_stats[user_id]["joke_count"] = user_stats[user_id].get("joke_count", 0) + 1
+        if user_stats[user_id]["joke_count"] >= 50:
+            add_achievement(user_id, "comedian")
+    
     check_command_achievements(user_id)
 
-def add_achievement(user_id: int, achievement_id: str):
+def add_achievement(user_id: int, achievement_id: str) -> bool:
     if user_id not in achievements:
         achievements[user_id] = []
     if achievement_id not in achievements[user_id]:
@@ -151,13 +208,46 @@ def add_achievement(user_id: int, achievement_id: str):
 
 def check_point_achievements(user_id: int):
     points = get_points(user_id)
-    if points >= 500:
+    if points >= 1000:
+        add_achievement(user_id, "millionaire")
+    elif points >= 500:
         add_achievement(user_id, "dedicated")
 
 def check_command_achievements(user_id: int):
     commands = user_stats[user_id]["commands_used"]
-    if commands >= 100:
+    if commands >= 500:
+        add_achievement(user_id, "power_user")
+    elif commands >= 100:
         add_achievement(user_id, "social_butterfly")
+
+def check_trivia_achievements(user_id: int):
+    correct = user_stats[user_id].get("trivia_correct", 0)
+    
+    # First blood
+    if correct == 1:
+        if add_achievement(user_id, "first_blood"):
+            return "first_blood"
+    
+    # Trivia master
+    if correct >= 10:
+        if add_achievement(user_id, "trivia_master"):
+            return "trivia_master"
+    
+    # Trivia legend
+    if correct >= 50:
+        if add_achievement(user_id, "trivia_legend"):
+            return "trivia_legend"
+    
+    # Check streak achievements
+    streak = trivia_streak.get(user_id, 0)
+    if streak >= 10:
+        if add_achievement(user_id, "unstoppable"):
+            return "unstoppable"
+    elif streak >= 5:
+        if add_achievement(user_id, "perfectionist"):
+            return "perfectionist"
+    
+    return None
 
 def can_claim_daily(user_id: int) -> bool:
     today = datetime.now().date()
@@ -183,13 +273,16 @@ def claim_daily(user_id: int) -> int:
     
     daily_claims[user_id] = today
     
-    # Check for achievement
-    if user_streaks[user_id]["streak"] >= 7:
+    # Check for achievements
+    streak = user_streaks[user_id]["streak"]
+    if streak >= 30:
+        add_achievement(user_id, "month_champion")
+    elif streak >= 7:
         add_achievement(user_id, "early_bird")
     
     # Base reward + streak bonus
     base_reward = 50
-    streak_bonus = min(user_streaks[user_id]["streak"] * 5, 100)
+    streak_bonus = min(streak * 5, 100)
     return base_reward + streak_bonus
 
 # ========== API FUNCTIONS =================
@@ -374,31 +467,40 @@ class TriviaAnswerModal(Modal, title="Answer Trivia Question"):
                     "commands_used": 0,
                     "last_seen": datetime.now(),
                     "trivia_correct": 0,
-                    "trivia_wrong": 0
+                    "trivia_wrong": 0,
+                    "joke_count": 0
                 }
             user_stats[interaction.user.id]["trivia_correct"] += 1
             
-            # Check achievements
-            if user_stats[interaction.user.id]["trivia_correct"] == 1:
-                new_achievement = add_achievement(interaction.user.id, "first_blood")
-                if new_achievement:
-                    points_earned += ACHIEVEMENTS_LIST["first_blood"]["points"]
+            # Update streak
+            trivia_streak[interaction.user.id] = trivia_streak.get(interaction.user.id, 0) + 1
             
-            if user_stats[interaction.user.id]["trivia_correct"] >= 10:
-                new_achievement = add_achievement(interaction.user.id, "trivia_master")
-                if new_achievement:
-                    points_earned += ACHIEVEMENTS_LIST["trivia_master"]["points"]
-            
+            # Check for quick draw
+            new_achievements = []
             if response_time < 5:
-                new_achievement = add_achievement(interaction.user.id, "quick_draw")
-                if new_achievement:
+                if add_achievement(interaction.user.id, "quick_draw"):
+                    new_achievements.append("Quick Draw")
                     points_earned += ACHIEVEMENTS_LIST["quick_draw"]["points"]
+            
+            # Check other achievements
+            achievement_earned = check_trivia_achievements(interaction.user.id)
+            if achievement_earned:
+                ach = ACHIEVEMENTS_LIST.get(achievement_earned)
+                if ach:
+                    new_achievements.append(ach["name"])
+                    points_earned += ach["points"]
+            
+            achievement_text = ""
+            if new_achievements:
+                achievement_text = f"\n🎉 **Achievement Unlocked:** {', '.join(new_achievements)}!"
             
             await interaction.response.send_message(
                 f"✅ **Correct!** 🎉\n"
                 f"You earned **{points_earned} points**!\n"
                 f"Response time: **{response_time:.2f}s**\n"
-                f"Total points: **{get_points(interaction.user.id)}**",
+                f"Streak: **{trivia_streak.get(interaction.user.id, 0)}** 🔥\n"
+                f"Total points: **{get_points(interaction.user.id)}**"
+                f"{achievement_text}",
                 ephemeral=True
             )
             
@@ -421,12 +523,14 @@ class TriviaAnswerModal(Modal, title="Answer Trivia Question"):
                 pass
             
         else:
-            # Wrong answer
+            # Wrong answer - break streak
+            trivia_streak[interaction.user.id] = 0
             user_stats[interaction.user.id]["trivia_wrong"] += 1
             
             await interaction.response.send_message(
                 f"❌ **Incorrect!**\n"
                 f"Your answer: `{user_answer}`\n"
+                f"Streak broken! 💔\n"
                 f"You can't answer this question again!",
                 ephemeral=True
             )
@@ -446,16 +550,8 @@ class TriviaView(View):
         if self.guild_id in active_trivia:
             trivia = active_trivia[self.guild_id]
             try:
-                channel = await self.message.channel.fetch()
-                message = await channel.fetch_message(trivia["message_id"])
-                embed = message.embeds[0]
-                embed.color = discord.Color.red()
-                embed.add_field(
-                    name="⏰ Time's Up!",
-                    value=f"The correct answer was: **{trivia['answer']}**",
-                    inline=False
-                )
-                await message.edit(embed=embed, view=None)
+                # Note: we can't easily fetch channel from view, so we skip message update on timeout
+                pass
             except:
                 pass
             del active_trivia[self.guild_id]
@@ -481,20 +577,61 @@ class RiddleView(View):
 # ========== MODEL LOADING =================
 
 print("Loading AI model...")
-llm = GPT4All(
-    model_name=MODEL_NAME,
-    model_path=MODEL_DIR,
-    allow_download=False
-)
-print("AI model loaded ✅")
+print(f"Model path: {MODEL_DIR}")
+print(f"Model name: {MODEL_NAME}")
+
+try:
+    llm = GPT4All(
+        model_name=MODEL_NAME,
+        model_path=str(MODEL_DIR),
+        allow_download=False,
+        device='cpu'  # Explicitly set to CPU for stability
+    )
+    print("AI model loaded ✅")
+except Exception as e:
+    print(f"❌ Error loading model: {e}")
+    print("Bot will continue without AI chat functionality")
+    llm = None
 
 def generate_reply(user_message: str) -> str:
-    prompt = SYSTEM_PROMPT + "\nUser message:\n" + user_message + "\nAssistant:"
-    raw = llm.generate(prompt, max_tokens=MAX_TOKENS, temp=0.7)
-    reply = clean_output(raw)
-    if not reply:
-        return "🤔 I'm not sure how to answer that."
-    return reply
+    """
+    Improved AI generation with better prompt formatting and stop sequences
+    """
+    if llm is None:
+        return "🤖 AI is currently unavailable. Please try again later!"
+    
+    try:
+        # Create a cleaner prompt format
+        full_prompt = f"{SYSTEM_PROMPT}\n<|user|>\n{user_message}\n<|end|>\n<|assistant|>\n"
+        
+        # Generate with stop sequences to prevent "end" and "assistant:" from appearing
+        raw = llm.generate(
+            full_prompt,
+            max_tokens=MAX_TOKENS,
+            temp=0.7,
+            top_k=40,
+            top_p=0.9,
+            repeat_penalty=1.2,  # Prevent repetition
+            n_batch=8
+        )
+        
+        # Clean the output thoroughly
+        reply = clean_output(raw)
+        
+        # Final safety check
+        if not reply or len(reply) < 2:
+            return "🤔 I'm not sure how to answer that."
+        
+        # Limit response length for Discord
+        if len(reply) > 1900:
+            reply = reply[:1900] + "..."
+        
+        return reply
+        
+    except Exception as e:
+        if DEBUG_MODE:
+            print(f"AI generation error: {e}")
+        return "🤖 I had trouble processing that. Could you rephrase?"
 
 # ========== BOT FACTORY ===================
 
@@ -551,13 +688,18 @@ def create_bot():
             return
         
         # AI response
+        if llm is None:
+            await message.channel.send("🤖 AI chat is currently unavailable. Try using slash commands instead!")
+            return
+            
         async with message.channel.typing():
             async with model_lock:
                 try:
                     reply = await asyncio.to_thread(generate_reply, user_input)
                 except Exception:
-                    traceback.print_exc()
-                    reply = "⚠️ AI crashed. Please try again."
+                    if DEBUG_MODE:
+                        traceback.print_exc()
+                    reply = "⚠️ I had trouble processing that. Please try again!"
 
         await message.channel.send(reply)
 
@@ -641,12 +783,15 @@ def create_bot():
         streak = user_streaks.get(target.id, {}).get("streak", 0)
         embed.add_field(name="🔥 Daily Streak", value=f"{streak} day(s)", inline=True)
         
+        # Trivia streak
+        t_streak = trivia_streak.get(target.id, 0)
+        embed.add_field(name="🎯 Trivia Streak", value=f"{t_streak} correct", inline=True)
+        
         # Stats
         if target.id in user_stats:
             stats = user_stats[target.id]
             embed.add_field(name="📊 Commands Used", value=str(stats["commands_used"]), inline=True)
             embed.add_field(name="✅ Trivia Correct", value=str(stats.get("trivia_correct", 0)), inline=True)
-            embed.add_field(name="❌ Trivia Wrong", value=str(stats.get("trivia_wrong", 0)), inline=True)
             
             if stats.get("trivia_correct", 0) + stats.get("trivia_wrong", 0) > 0:
                 accuracy = (stats.get("trivia_correct", 0) / (stats.get("trivia_correct", 0) + stats.get("trivia_wrong", 0))) * 100
@@ -659,19 +804,19 @@ def create_bot():
         await interaction.response.send_message(embed=embed)
         track_user_activity(interaction.user.id)
 
-    @bot.tree.command(name="joke", description="Get a random joke")
+    @bot.tree.command(name="joke", description="Get a random joke 😂")
     async def joke(interaction: discord.Interaction):
         await interaction.response.defer()
         joke_text = await get_joke_async("en")
         await interaction.followup.send(f"😂 {joke_text}")
-        track_user_activity(interaction.user.id)
+        track_user_activity(interaction.user.id, "joke")
 
-    @bot.tree.command(name="joke_de", description="Bekomme einen deutschen Witz")
+    @bot.tree.command(name="joke_de", description="Bekomme einen deutschen Witz 😂")
     async def joke_de(interaction: discord.Interaction):
         await interaction.response.defer()
         joke_text = await get_joke_async("de")
         await interaction.followup.send(f"😂 {joke_text}")
-        track_user_activity(interaction.user.id)
+        track_user_activity(interaction.user.id, "joke")
 
     @bot.tree.command(name="roast", description="Roast someone with a savage burn 🔥")
     @app_commands.describe(user="The user to roast (optional)")
@@ -787,9 +932,15 @@ def create_bot():
             try:
                 user = await bot.fetch_user(user_id)
                 medal = medals[i] if i < 3 else f"#{i+1}"
+                
+                # Add streak info if available
+                streak_info = ""
+                if user_id in trivia_streak and trivia_streak[user_id] > 0:
+                    streak_info = f" 🔥 {trivia_streak[user_id]}"
+                
                 embed.add_field(
                     name=f"{medal} {user.name}",
-                    value=f"{pts} points",
+                    value=f"{pts} points{streak_info}",
                     inline=False
                 )
             except:
@@ -910,6 +1061,9 @@ def create_bot():
         if sides < 2:
             await interaction.response.send_message("❌ Dice must have at least 2 sides!")
             return
+        if sides > 1000:
+            await interaction.response.send_message("❌ Maximum 1000 sides!")
+            return
         result = random.randint(1, sides)
         await interaction.response.send_message(f"🎲 You rolled a **{result}** on a {sides}-sided dice!")
         track_user_activity(interaction.user.id)
@@ -952,6 +1106,7 @@ def create_bot():
         embed.add_field(name="Points", value=get_points(interaction.user.id), inline=True)
         embed.add_field(name="Trivia Correct", value=stats.get("trivia_correct", 0), inline=True)
         embed.add_field(name="Trivia Wrong", value=stats.get("trivia_wrong", 0), inline=True)
+        embed.add_field(name="Current Streak", value=f"{trivia_streak.get(interaction.user.id, 0)} 🔥", inline=True)
         embed.add_field(
             name="Last Seen",
             value=stats["last_seen"].strftime("%Y-%m-%d %H:%M:%S"),
