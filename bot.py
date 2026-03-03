@@ -114,8 +114,8 @@ PERSONAS = {
         "Always reply in the same language the user is writing in."
     ),
     "leader": (
-        "You are Rune, a confident and inspiring leader bot. "
-        "Speak with authority and motivation. One sentence only. "
+        "You are Rune, a confident and inspiring leader bot. Speak with authority and motivation! "
+        "Encourage users to be their best selves. One sentence only. "
         "Always reply in the same language the user is writing in."
     )
 }
@@ -316,6 +316,10 @@ def create_bot():
         # can take up to 1 hour to propagate changes everywhere, but you
         # still NEVER need to re-invite the bot for new commands.
         # ---------------------------------------------------------------
+        # Wipe stale guild-specific commands from every server, then global sync
+        for g in bot.guilds:
+            bot.tree.clear_commands(guild=g)
+            await bot.tree.sync(guild=g)
         await bot.tree.sync()
         print("✅ Slash commands synced globally")
 
@@ -919,7 +923,7 @@ def create_bot():
         app_commands.Choice(name="Shakespeare 📜", value="shakespeare"),
         app_commands.Choice(name="Robot 🤖", value="robot"),
         app_commands.Choice(name="Cheerful 🎉", value="cheerful"),
-        app_commands.Choice(name="Leader 🧠", value="leader"),
+        app_commands.Choice(name="Leader 🏆", value="leader")
     ])
     async def persona(interaction: discord.Interaction, style: str):
         user_personas[interaction.user.id] = style
@@ -931,6 +935,7 @@ def create_bot():
             "shakespeare": "Henceforth, I shall speaketh in the tongue of the Bard! 📜",
             "robot": "ACKNOWLEDGED. SWITCHING TO ROBOT MODE. BEEP BOOP. 🤖",
             "cheerful": "YAY! I'm SO excited to be super cheerful for you! 🎉✨",
+            "leader": "I shall conquer the world!"
         }
         embed = discord.Embed(
             title="🎭 Persona Changed!",
