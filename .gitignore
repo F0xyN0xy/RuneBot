@@ -57,6 +57,7 @@ models/
 .vscode/
 *.code-workspace
 .qodo
+data.json
 
 # PyCharm
 .idea/

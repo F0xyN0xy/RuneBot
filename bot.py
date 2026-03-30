@@ -24,6 +24,7 @@ DATA_FILE = "data.json"
 
 # =========================================
 
+assert GROQ_API_KEY is not None, "GROQ_API_KEY is not set in .env!"
 groq_client = Groq(api_key=GROQ_API_KEY)
 
 # ============== PERSISTENT STORAGE ==================
@@ -199,12 +200,37 @@ async def get_joke_async():
     except Exception:
         return "😄 Joke generator is taking a break."
 
+FALLBACK_TRIVIA = [
+    {"question": "What is the capital of Australia?", "correct_answer": "Canberra", "incorrect_answers": ["Sydney", "Melbourne", "Brisbane"], "category": "Geography", "difficulty": "medium"},
+    {"question": "How many sides does a hexagon have?", "correct_answer": "6", "incorrect_answers": ["5", "7", "8"], "category": "Mathematics", "difficulty": "easy"},
+    {"question": "What planet is known as the Red Planet?", "correct_answer": "Mars", "incorrect_answers": ["Venus", "Jupiter", "Saturn"], "category": "Science", "difficulty": "easy"},
+    {"question": "Who wrote 'Romeo and Juliet'?", "correct_answer": "William Shakespeare", "incorrect_answers": ["Charles Dickens", "Leo Tolstoy", "Mark Twain"], "category": "Literature", "difficulty": "easy"},
+    {"question": "What is the chemical symbol for gold?", "correct_answer": "Au", "incorrect_answers": ["Ag", "Fe", "Pb"], "category": "Science", "difficulty": "easy"},
+    {"question": "In which year did the Berlin Wall fall?", "correct_answer": "1989", "incorrect_answers": ["1991", "1985", "1993"], "category": "History", "difficulty": "medium"},
+    {"question": "What is the longest river in the world?", "correct_answer": "Nile", "incorrect_answers": ["Amazon", "Yangtze", "Mississippi"], "category": "Geography", "difficulty": "medium"},
+    {"question": "How many bones are in the adult human body?", "correct_answer": "206", "incorrect_answers": ["198", "215", "224"], "category": "Science", "difficulty": "medium"},
+    {"question": "What is the smallest country in the world by area?", "correct_answer": "Vatican City", "incorrect_answers": ["Monaco", "San Marino", "Liechtenstein"], "category": "Geography", "difficulty": "medium"},
+    {"question": "What programming language was created by Guido van Rossum?", "correct_answer": "Python", "incorrect_answers": ["Ruby", "Perl", "Java"], "category": "Technology", "difficulty": "easy"},
+    {"question": "How many planets are in our solar system?", "correct_answer": "8", "incorrect_answers": ["7", "9", "10"], "category": "Science", "difficulty": "easy"},
+    {"question": "What is the fastest land animal?", "correct_answer": "Cheetah", "incorrect_answers": ["Lion", "Greyhound", "Pronghorn"], "category": "Animals", "difficulty": "easy"},
+    {"question": "Which element has the atomic number 1?", "correct_answer": "Hydrogen", "incorrect_answers": ["Helium", "Lithium", "Carbon"], "category": "Science", "difficulty": "easy"},
+    {"question": "What year did World War II end?", "correct_answer": "1945", "incorrect_answers": ["1943", "1944", "1946"], "category": "History", "difficulty": "easy"},
+    {"question": "What is the square root of 144?", "correct_answer": "12", "incorrect_answers": ["11", "13", "14"], "category": "Mathematics", "difficulty": "easy"},
+    {"question": "Which ocean is the largest?", "correct_answer": "Pacific", "incorrect_answers": ["Atlantic", "Indian", "Arctic"], "category": "Geography", "difficulty": "easy"},
+    {"question": "Who painted the Mona Lisa?", "correct_answer": "Leonardo da Vinci", "incorrect_answers": ["Michelangelo", "Raphael", "Botticelli"], "category": "Art", "difficulty": "easy"},
+    {"question": "What is the hardest natural substance on Earth?", "correct_answer": "Diamond", "incorrect_answers": ["Quartz", "Corundum", "Topaz"], "category": "Science", "difficulty": "easy"},
+    {"question": "In what country was the sport of cricket invented?", "correct_answer": "England", "incorrect_answers": ["India", "Australia", "Pakistan"], "category": "Sports", "difficulty": "medium"},
+    {"question": "What does HTTP stand for?", "correct_answer": "HyperText Transfer Protocol", "incorrect_answers": ["High Transfer Text Protocol", "HyperText Transmission Protocol", "Hyper Transfer Text Procedure"], "category": "Technology", "difficulty": "medium"},
+]
+
 async def get_trivia_question():
     try:
         url = "https://opentdb.com/api.php?amount=1&type=multiple"
         async with aiohttp.ClientSession() as session:
-            async with session.get(url, timeout=aiohttp.ClientTimeout(total=5)) as resp:
-                data = await resp.json()
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=6)) as resp:
+                if resp.status == 429:
+                    raise Exception("Rate limited")
+                data = await resp.json(content_type=None)
                 if data["response_code"] == 0:
                     q = data["results"][0]
                     return {
@@ -216,7 +242,15 @@ async def get_trivia_question():
                     }
     except Exception:
         pass
-    return None
+    # Fallback: pick a random local question
+    q = random.choice(FALLBACK_TRIVIA)
+    return {
+        "question": q["question"],
+        "correct_answer": q["correct_answer"],
+        "all_answers": q["incorrect_answers"] + [q["correct_answer"]],
+        "category": q["category"],
+        "difficulty": q["difficulty"]
+    }
 
 async def get_cat_fact():
     try:
@@ -263,14 +297,36 @@ async def get_meme():
     except Exception:
         return None
 
+ACTIVITY_SUGGESTIONS = [
+    "Go for a 20-minute walk outside 🚶",
+    "Learn three new facts about a country you've never visited 🌍",
+    "Write down 5 things you're grateful for today 📝",
+    "Try cooking a recipe you've never made before 🍳",
+    "Call or message a friend you haven't spoken to in a while 📞",
+    "Do a 10-minute meditation or deep-breathing session 🧘",
+    "Sketch or doodle something without worrying about the result 🎨",
+    "Read a chapter of a book you've been putting off 📖",
+    "Organize one drawer or shelf in your home 🗂️",
+    "Watch a documentary on a topic you know nothing about 🎬",
+    "Learn 10 words in a new language 🗣️",
+    "Do 20 push-ups, squats, or jumping jacks 💪",
+    "Write a short poem about your day ✍️",
+    "Try a new genre of music and make a playlist 🎵",
+    "Play a puzzle, chess, or a brain teaser game 🧩",
+    "Plant something — even a windowsill herb counts 🌱",
+    "Write a letter to your future self 📬",
+    "Watch a TED Talk on something you've always been curious about 💡",
+    "Try drawing a self-portrait — no artistic skill required! 😄",
+    "Plan your ideal dream trip, even if it's just in your head ✈️",
+    "Do a random act of kindness for someone nearby 💙",
+    "Bake something sweet and share it 🍪",
+    "Set a 15-minute timer and declutter your desktop or phone 📱",
+    "Stargaze or watch the sunset/sunrise tonight 🌅",
+    "Try a new sport or physical activity for 30 minutes 🏸",
+]
+
 async def get_activity_suggestion():
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get("https://www.boredapi.com/api/activity", timeout=aiohttp.ClientTimeout(total=5)) as resp:
-                data = await resp.json()
-                return data.get("activity", "Try something new today!")
-    except Exception:
-        return "Try something new today!"
+    return random.choice(ACTIVITY_SUGGESTIONS)
 
 # ========== AI REPLY =================
 
@@ -328,6 +384,35 @@ def create_bot():
         print(f"📊 Serving {len(bot.guilds)} servers")
         print(f"💾 Loaded {len(user_points)} user point records from disk")
 
+    @bot.tree.error
+    async def on_app_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
+        if isinstance(error, app_commands.CommandOnCooldown):
+            try:
+                await interaction.response.send_message(
+                    f"⏳ Slow down! Try again in **{error.retry_after:.1f}s**.", ephemeral=True
+                )
+            except Exception:
+                pass
+            return
+        if isinstance(error, app_commands.MissingPermissions):
+            try:
+                await interaction.response.send_message("❌ You don't have permission for that!", ephemeral=True)
+            except Exception:
+                pass
+            return
+        inner = getattr(error, "original", error)
+        if isinstance(inner, discord.HTTPException) and inner.status == 429:
+            print(f"⚠️  Discord 429 on command — Cloudflare may be rate-limiting this IP")
+            return
+        traceback.print_exc()
+        try:
+            if not interaction.response.is_done():
+                await interaction.response.send_message("⚠️ Something went wrong. Please try again!", ephemeral=True)
+            else:
+                await interaction.followup.send("⚠️ Something went wrong. Please try again!", ephemeral=True)
+        except Exception:
+            pass
+
     @bot.event
     async def on_message(message):
         if message.author.bot:
@@ -368,6 +453,7 @@ def create_bot():
     # ========== SLASH COMMANDS =================
 
     @bot.tree.command(name="joke", description="Get a random joke 😂")
+    @app_commands.checks.cooldown(1, 5, key=lambda i: i.user.id)
     async def joke(interaction: discord.Interaction):
         await interaction.response.defer()
         joke_text = await get_joke_async()
@@ -399,7 +485,7 @@ def create_bot():
             self.correct    = correct
             self.answered   = False          # True once someone is correct
             self.wrong_ids  = set()          # users who already guessed wrong
-            self.message    = None           # set after send so we can edit on timeout
+            self.message: discord.Message | None = None  # set after send so we can edit on timeout
 
             letters = ["A", "B", "C", "D"]
             for i, ans in enumerate(answers):
@@ -431,16 +517,18 @@ def create_bot():
                     add_points(interaction.user.id, 10)
                     # Disable all buttons and mark correct one green
                     for item in self.children:
-                        item.disabled = True
-                        if item.label.split(". ", 1)[-1] == answer[:80]:
-                            item.style = discord.ButtonStyle.success
-                        else:
-                            item.style = discord.ButtonStyle.secondary
+                        if isinstance(item, discord.ui.Button):
+                            item.disabled = True
+                            if item.label and item.label.split(". ", 1)[-1] == answer[:80]:
+                                item.style = discord.ButtonStyle.success
+                            else:
+                                item.style = discord.ButtonStyle.secondary
                     self.stop()
-                    embed = self.message.embeds[0]
-                    embed.color = discord.Color.green()
-                    embed.set_footer(text=f"✅ {interaction.user.display_name} got it right! +10 points")
-                    await interaction.response.edit_message(embed=embed, view=self)
+                    if self.message:
+                        embed = self.message.embeds[0]
+                        embed.color = discord.Color.green()
+                        embed.set_footer(text=f"✅ {interaction.user.display_name} got it right! +10 points")
+                        await interaction.response.edit_message(embed=embed, view=self)
                     await interaction.followup.send(
                         f"🎉 **{interaction.user.mention}** answered correctly and earned **10 points**!\n"
                         f"Total: **{get_points(interaction.user.id)}** points"
@@ -448,20 +536,24 @@ def create_bot():
                 else:
                     # Wrong — lock this user out silently (only they see it)
                     self.wrong_ids.add(interaction.user.id)
-                    await interaction.response.send_message(
-                        "❌ **Wrong answer!** You're locked out of this question.", ephemeral=True
-                    )
+                    try:
+                        await interaction.response.send_message(
+                            "❌ **Wrong answer!** You're locked out of this question.", ephemeral=True
+                        )
+                    except discord.HTTPException:
+                        pass
             return callback
 
         async def on_timeout(self):
             self.answered = True
             active_trivia.pop(self.guild_id, None)
             for item in self.children:
-                item.disabled = True
-                if item.label.split(". ", 1)[-1] == self.correct[:80]:
-                    item.style = discord.ButtonStyle.success
-                else:
-                    item.style = discord.ButtonStyle.secondary
+                if isinstance(item, discord.ui.Button):
+                    item.disabled = True
+                    if item.label and item.label.split(". ", 1)[-1] == self.correct[:80]:
+                        item.style = discord.ButtonStyle.success
+                    else:
+                        item.style = discord.ButtonStyle.secondary
             if self.message:
                 embed = self.message.embeds[0]
                 embed.color = discord.Color.red()
@@ -475,21 +567,32 @@ def create_bot():
                     pass
 
     @bot.tree.command(name="trivia", description="Start a trivia question! 🧠")
+    @app_commands.checks.cooldown(1, 10, key=lambda i: i.guild_id)
     async def trivia(interaction: discord.Interaction):
         await interaction.response.defer()
-        if interaction.guild.id in active_trivia:
-            await interaction.followup.send("❌ A trivia question is already active! Finish it first.")
+        guild = interaction.guild
+        if not guild:
+            await interaction.followup.send("This command can only be used in a server.", ephemeral=True)
+            return
+        if guild.id in active_trivia:
+            try:
+                await interaction.followup.send("❌ A trivia question is already active! Finish it first.")
+            except discord.HTTPException:
+                pass
             return
         question_data = await get_trivia_question()
         if not question_data:
-            await interaction.followup.send("⚠️ Couldn't fetch a trivia question. Try again!")
+            try:
+                await interaction.followup.send("⚠️ Couldn't fetch a trivia question. Try again!")
+            except discord.HTTPException:
+                pass
             return
 
         correct  = question_data["correct_answer"]
         answers  = question_data["all_answers"][:]
         random.shuffle(answers)
 
-        active_trivia[interaction.guild.id] = {"answer": correct, "category": question_data["category"]}
+        active_trivia[guild.id] = {"answer": correct, "category": question_data["category"]}
 
         diff_colors = {"easy": discord.Color.green(), "medium": discord.Color.orange(), "hard": discord.Color.red()}
         color = diff_colors.get(question_data["difficulty"], discord.Color.blue())
@@ -504,12 +607,30 @@ def create_bot():
         embed.add_field(name="⏳ Time Limit",  value="5 minutes",                             inline=True)
         embed.set_footer(text="Press a button to answer! Wrong answers lock you out.")
 
-        view = TriviaView(interaction.guild.id, correct, answers, question_data)
-        msg  = await interaction.followup.send(embed=embed, view=view)
-        view.message = msg
+        view = TriviaView(guild.id, correct, answers, question_data)
+        try:
+            msg  = await interaction.followup.send(embed=embed, view=view)
+            view.message = msg
+        except discord.HTTPException as e:
+            active_trivia.pop(guild.id, None)
+            print(f"⚠️  Could not send trivia message: {e}")
+            return
         track_user_activity(interaction.user.id)
 
-    @bot.tree.command(name="points", description="Check your points or someone else's 🏆")
+    @bot.tree.command(name="resettrivia", description="Force-reset a stuck trivia question 🔄 (Mod only)")
+    @app_commands.checks.has_permissions(manage_messages=True)
+    async def resettrivia(interaction: discord.Interaction):
+        guild = interaction.guild
+        if not guild:
+            await interaction.response.send_message("This command can only be used in a server.", ephemeral=True)
+            return
+        if guild.id in active_trivia:
+            active_trivia.pop(guild.id)
+            await interaction.response.send_message("✅ Active trivia question has been reset. You can start a new one!", ephemeral=True)
+        else:
+            await interaction.response.send_message("ℹ️ There's no active trivia question to reset.", ephemeral=True)
+
+
     @app_commands.describe(user="User to check points for (optional)")
     async def points(interaction: discord.Interaction, user: Optional[discord.User] = None):
         target = user or interaction.user
@@ -641,7 +762,7 @@ def create_bot():
             self.votes: dict[int, int] = {}   # user_id -> option index
             self.counts = [0] * len(options)
             self.closed  = False
-            self.message = None
+            self.message: discord.Message | None = None
 
             letters = ["🇦", "🇧", "🇨", "🇩"]
             for i, opt in enumerate(options):
@@ -704,7 +825,8 @@ def create_bot():
             self.closed = True
             self.stop()
             for item in self.children:
-                item.disabled = True
+                if isinstance(item, discord.ui.Button):
+                    item.disabled = True
             await self._refresh_embed(interaction, closed=True)
 
         def _build_embed(self, closed: bool = False) -> discord.Embed:
@@ -717,8 +839,9 @@ def create_bot():
                 bar   = "█" * int(pct / 10) + "░" * (10 - int(pct / 10))
                 desc_lines.append(f"{letters[i]} **{opt}**\n`{bar}` {count} vote{'s' if count != 1 else ''} ({pct:.1f}%)\n")
             status = "🔒 Poll Closed" if closed else "📊 Poll Active"
+            title = self.message.embeds[0].title if self.message and self.message.embeds else "📊 Poll"
             embed = discord.Embed(
-                title=self.message.embeds[0].title if self.message else "📊 Poll",
+                title=title,
                 description="\n".join(desc_lines),
                 color=discord.Color.greyple() if closed else discord.Color.blurple()
             )
@@ -730,7 +853,7 @@ def create_bot():
             try:
                 if closed:
                     await interaction.response.edit_message(embed=embed, view=self)
-                else:
+                elif self.message:
                     await self.message.edit(embed=embed, view=self)
             except Exception:
                 pass
@@ -765,7 +888,8 @@ def create_bot():
 
         view = PollView(options, interaction.user.id)
         await interaction.response.send_message(embed=embed, view=view)
-        view.message = await interaction.original_response()
+        msg = await interaction.original_response()
+        view.message = msg  # type: ignore[assignment]  # InteractionMessage is compatible at runtime
         track_user_activity(interaction.user.id)
 
     @bot.tree.command(name="serverinfo", description="View info about this server 🏠")
@@ -787,6 +911,7 @@ def create_bot():
         track_user_activity(interaction.user.id)
 
     @bot.tree.command(name="catfact", description="Get a random cat fact 🐱")
+    @app_commands.checks.cooldown(1, 8, key=lambda i: i.user.id)
     async def catfact(interaction: discord.Interaction):
         await interaction.response.defer()
         fact = await get_cat_fact()
@@ -795,6 +920,7 @@ def create_bot():
         track_user_activity(interaction.user.id)
 
     @bot.tree.command(name="dog", description="Get a random dog picture 🐕")
+    @app_commands.checks.cooldown(1, 8, key=lambda i: i.user.id)
     async def dog(interaction: discord.Interaction):
         await interaction.response.defer()
         image_url = await get_dog_image()
@@ -886,6 +1012,9 @@ def create_bot():
         if minutes < 1 or minutes > 1440:
             await interaction.response.send_message("❌ Please set a reminder between 1 and 1440 minutes!")
             return
+        if not isinstance(interaction.channel, (discord.TextChannel, discord.Thread, discord.DMChannel, discord.VoiceChannel)):
+            await interaction.response.send_message("❌ Can't set reminders in this channel type!", ephemeral=True)
+            return
         remind_time = datetime.now() + timedelta(minutes=minutes)
         reminders.append({
             "user_id": interaction.user.id,
@@ -952,6 +1081,7 @@ def create_bot():
     @app_commands.describe(user="The user to kick", reason="Reason for kick (optional)")
     @app_commands.checks.has_permissions(kick_members=True)
     async def kick(interaction: discord.Interaction, user: discord.Member, reason: Optional[str] = "No reason provided"):
+        assert interaction.guild is not None
         if user.top_role >= interaction.guild.me.top_role:
             await interaction.response.send_message("❌ I can't kick someone with a higher or equal role than me!", ephemeral=True)
             return
@@ -976,6 +1106,7 @@ def create_bot():
     @app_commands.describe(user="The user to ban", reason="Reason for ban (optional)", delete_days="Days of messages to delete (0-7)")
     @app_commands.checks.has_permissions(ban_members=True)
     async def ban(interaction: discord.Interaction, user: discord.Member, reason: Optional[str] = "No reason provided", delete_days: int = 0):
+        assert interaction.guild is not None
         if user.top_role >= interaction.guild.me.top_role:
             await interaction.response.send_message("❌ I can't ban someone with a higher or equal role than me!", ephemeral=True)
             return
@@ -1001,6 +1132,7 @@ def create_bot():
     @app_commands.describe(user="The user to mute", minutes="Duration in minutes (max 40320 = 28 days)", reason="Reason (optional)")
     @app_commands.checks.has_permissions(moderate_members=True)
     async def mute(interaction: discord.Interaction, user: discord.Member, minutes: int = 10, reason: Optional[str] = "No reason provided"):
+        assert interaction.guild is not None
         if user.top_role >= interaction.guild.me.top_role:
             await interaction.response.send_message("❌ I can't mute someone with a higher or equal role than me!", ephemeral=True)
             return
@@ -1055,7 +1187,7 @@ def create_bot():
             ("🐾 **Animals**", "`/catfact`, `/dog`"),
             ("💡 **Inspiration**", "`/advice`, `/quote`, `/activity`"),
             ("🎭 **AI Persona**", "`/persona` — Change how Rune talks to you (your choice is private!)"),
-            ("🛡️ **Moderation**", "`/kick`, `/ban`, `/mute`, `/unmute` *(requires permissions)*"),
+            ("🛡️ **Moderation**", "`/kick`, `/ban`, `/mute`, `/unmute`, `/resettrivia` *(requires permissions)*"),
             ("⏰ **Utility**", "`/remind`, `/stats`, `/serverinfo`, `/help`"),
             ("💬 **AI Chat**", f"Use `{PREFIX}` prefix to chat with AI (e.g., `{PREFIX}hello`)"),
         ]
@@ -1074,7 +1206,7 @@ def create_bot():
                 try:
                     channel = bot.get_channel(reminder["channel_id"])
                     user = await bot.fetch_user(reminder["user_id"])
-                    if channel:
+                    if isinstance(channel, (discord.TextChannel, discord.Thread, discord.DMChannel, discord.VoiceChannel)):
                         await channel.send(f"⏰ {user.mention} Reminder: **{reminder['message']}**")
                     reminders.remove(reminder)
                 except Exception as e:
@@ -1089,6 +1221,7 @@ def run_forever():
     while True:
         try:
             bot = create_bot()
+            assert DISCORD_TOKEN is not None, "DISCORD_TOKEN is not set in .env!"
             bot.run(DISCORD_TOKEN)
         except Exception:
             print("🔴 BOT CRASHED:")
