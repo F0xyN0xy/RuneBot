@@ -18,42 +18,68 @@ load_dotenv()
 
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+JSONBIN_API_KEY = os.getenv("JSONBIN_API_KEY")
+JSONBIN_BIN_ID  = os.getenv("JSONBIN_BIN_ID")
 PREFIX = os.getenv("PREFIX", ".")
 RESTART_DELAY = int(os.getenv("RESTART_DELAY", "5"))
-DATA_FILE = "data.json"
+
+JSONBIN_URL = f"https://api.jsonbin.io/v3/b/{JSONBIN_BIN_ID}"
+JSONBIN_HEADERS: dict[str, str] = {
+    "Content-Type": "application/json",
+    "X-Master-Key": JSONBIN_API_KEY or "",
+    "X-Bin-Versioning": "false",
+}
 
 # =========================================
 
 assert GROQ_API_KEY is not None, "GROQ_API_KEY is not set in .env!"
+assert JSONBIN_API_KEY is not None, "JSONBIN_API_KEY is not set in .env!"
+assert JSONBIN_BIN_ID  is not None, "JSONBIN_BIN_ID is not set in .env!"
 groq_client = Groq(api_key=GROQ_API_KEY)
 
-# ============== PERSISTENT STORAGE ==================
-# All data is saved to data.json so it survives restarts.
+# ============== PERSISTENT STORAGE (JSONBin) ==================
+# All data lives in a single JSONBin bin. Loaded once on startup,
+# saved automatically every 60 seconds and on graceful shutdown.
+# Nothing is written to disk — safe for disk-constrained hosts.
 
-def load_data():
-    """Load persisted data from disk. Returns defaults if file missing."""
-    if os.path.exists(DATA_FILE):
-        try:
-            with open(DATA_FILE, "r") as f:
-                raw = json.load(f)
-            # JSON keys are always strings — convert user IDs back to int
-            user_points   = {int(k): v for k, v in raw.get("user_points", {}).items()}
-            user_stats_raw = raw.get("user_stats", {})
-            user_stats = {}
-            for k, v in user_stats_raw.items():
-                user_stats[int(k)] = {
-                    "commands_used": v["commands_used"],
-                    "last_seen": datetime.fromisoformat(v["last_seen"])
-                }
-            user_personas = {int(k): v for k, v in raw.get("user_personas", {}).items()}
-            daily_claimed = {int(k): v for k, v in raw.get("daily_claimed", {}).items()}
-            return user_points, user_stats, user_personas, daily_claimed
-        except Exception as e:
-            print(f"⚠️  Could not load data.json: {e}. Starting fresh.")
+_dirty = False   # True when in-memory data differs from cloud copy
+
+def _parse_raw(raw: dict) -> tuple[dict, dict, dict, dict]:
+    """Convert a raw JSONBin record into typed in-memory dicts."""
+    user_points = {int(k): v for k, v in raw.get("user_points", {}).items()}
+    user_stats: dict = {}
+    for k, v in raw.get("user_stats", {}).items():
+        user_stats[int(k)] = {
+            "commands_used": v["commands_used"],
+            "last_seen": datetime.fromisoformat(v["last_seen"])
+        }
+    user_personas = {int(k): v for k, v in raw.get("user_personas", {}).items()}
+    daily_claimed = {int(k): v for k, v in raw.get("daily_claimed", {}).items()}
+    return user_points, user_stats, user_personas, daily_claimed
+
+async def load_data_async() -> tuple[dict, dict, dict, dict]:
+    """Fetch data from JSONBin at startup. Returns empty dicts on failure."""
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                JSONBIN_URL, headers=JSONBIN_HEADERS,
+                timeout=aiohttp.ClientTimeout(total=10)
+            ) as resp:
+                if resp.status == 200:
+                    payload = await resp.json()
+                    raw = payload.get("record", {})
+                    result = _parse_raw(raw)
+                    print(f"\u2705 Loaded data from JSONBin ({len(result[0])} point records)")
+                    return result
+                else:
+                    print(f"\u26a0\ufe0f  JSONBin load failed (HTTP {resp.status}) — starting fresh.")
+    except Exception as e:
+        print(f"\u26a0\ufe0f  JSONBin load error: {e} — starting fresh.")
     return {}, {}, {}, {}
 
-def save_data():
-    """Persist all in-memory data to disk."""
+async def save_data_async() -> bool:
+    """Push current in-memory state to JSONBin. Returns True on success."""
+    global _dirty
     try:
         serializable_stats = {
             str(k): {
@@ -62,18 +88,36 @@ def save_data():
             }
             for k, v in user_stats.items()
         }
-        with open(DATA_FILE, "w") as f:
-            json.dump({
-                "user_points":  {str(k): v for k, v in user_points.items()},
-                "user_stats":   serializable_stats,
-                "user_personas": {str(k): v for k, v in user_personas.items()},
-                "daily_claimed": {str(k): v for k, v in daily_claimed.items()},
-            }, f, indent=2)
+        payload = {
+            "user_points":   {str(k): v for k, v in user_points.items()},
+            "user_stats":    serializable_stats,
+            "user_personas": {str(k): v for k, v in user_personas.items()},
+            "daily_claimed": {str(k): v for k, v in daily_claimed.items()},
+        }
+        async with aiohttp.ClientSession() as session:
+            async with session.put(
+                JSONBIN_URL, headers=JSONBIN_HEADERS,
+                json=payload, timeout=aiohttp.ClientTimeout(total=10)
+            ) as resp:
+                if resp.status == 200:
+                    _dirty = False
+                    return True
+                else:
+                    print(f"\u26a0\ufe0f  JSONBin save failed (HTTP {resp.status})")
     except Exception as e:
-        print(f"⚠️  Could not save data.json: {e}")
+        print(f"\u26a0\ufe0f  JSONBin save error: {e}")
+    return False
 
-# Load at startup
-user_points, user_stats, user_personas, daily_claimed = load_data()
+def mark_dirty():
+    """Mark data as changed so the auto-save task will pick it up."""
+    global _dirty
+    _dirty = True
+
+# In-memory store — populated at bot startup via on_ready
+user_points:   dict[int, int]  = {}
+user_stats:    dict[int, dict] = {}
+user_personas: dict[int, str]  = {}
+daily_claimed: dict[int, str]  = {}
 
 active_trivia = {}   # {guild_id: {answer, category}}
 reminders     = []   # [{user_id, channel_id, message, time}]
@@ -173,7 +217,7 @@ def clean_output(text: str) -> str:
 
 def add_points(user_id: int, points: int = 1):
     user_points[user_id] = user_points.get(user_id, 0) + points
-    save_data()
+    mark_dirty()
 
 def get_points(user_id: int) -> int:
     return user_points.get(user_id, 0)
@@ -183,7 +227,7 @@ def track_user_activity(user_id: int):
         user_stats[user_id] = {"commands_used": 0, "last_seen": datetime.now()}
     user_stats[user_id]["commands_used"] += 1
     user_stats[user_id]["last_seen"] = datetime.now()
-    save_data()
+    mark_dirty()
 
 # ========== API FUNCTIONS =================
 
@@ -363,16 +407,11 @@ def create_bot():
 
     @bot.event
     async def on_ready():
-        # ---------------------------------------------------------------
-        # SLASH COMMAND SYNC STRATEGY
-        # ---------------------------------------------------------------
-        # During development set DEV_GUILD_ID in your .env to your server's
-        # ID. Guild-scoped commands update INSTANTLY — no re-invite needed.
-        # For production (DEV_GUILD_ID not set) we sync globally; Discord
-        # can take up to 1 hour to propagate changes everywhere, but you
-        # still NEVER need to re-invite the bot for new commands.
-        # ---------------------------------------------------------------
-        # Wipe stale guild-specific commands from every server, then global sync
+        global user_points, user_stats, user_personas, daily_claimed
+        # Load data from JSONBin on startup
+        user_points, user_stats, user_personas, daily_claimed = await load_data_async()
+
+        # Sync slash commands
         for g in bot.guilds:
             bot.tree.clear_commands(guild=g)
             await bot.tree.sync(guild=g)
@@ -380,9 +419,10 @@ def create_bot():
         print("✅ Slash commands synced globally")
 
         check_reminders.start()
+        auto_save.start()
         print(f"✅ Bot online as {bot.user}")
         print(f"📊 Serving {len(bot.guilds)} servers")
-        print(f"💾 Loaded {len(user_points)} user point records from disk")
+        print(f"☁️  Storage: JSONBin ({len(user_points)} point records loaded)")
 
     @bot.tree.error
     async def on_app_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
@@ -700,8 +740,7 @@ def create_bot():
             return
         bonus = random.randint(15, 50)
         daily_claimed[uid] = now_str
-        add_points(uid, bonus)  # also calls save_data()
-        save_data()
+        add_points(uid, bonus)
         embed = discord.Embed(
             title="🌅 Daily Bonus!",
             description=f"You claimed **{bonus}** bonus points!\nTotal: **{get_points(uid)}** points",
@@ -1056,7 +1095,7 @@ def create_bot():
     ])
     async def persona(interaction: discord.Interaction, style: str):
         user_personas[interaction.user.id] = style
-        save_data()
+        mark_dirty()
         descriptions = {
             "default": "Back to normal — helpful and friendly! 😊",
             "sarcastic": "Oh great, you picked sarcastic. Wonderful choice. 🙄",
@@ -1212,6 +1251,14 @@ def create_bot():
                 except Exception as e:
                     print(f"Error sending reminder: {e}")
                     reminders.remove(reminder)
+
+    @tasks.loop(seconds=60)
+    async def auto_save():
+        """Persist data to JSONBin every 60 seconds if anything changed."""
+        if _dirty:
+            success = await save_data_async()
+            if success:
+                print("☁️  Auto-saved data to JSONBin.")
 
     return bot
 
