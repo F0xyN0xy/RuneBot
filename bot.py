@@ -18,68 +18,46 @@ load_dotenv()
 
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-JSONBIN_API_KEY = os.getenv("JSONBIN_API_KEY")
-JSONBIN_BIN_ID  = os.getenv("JSONBIN_BIN_ID")
 PREFIX = os.getenv("PREFIX", ".")
-RESTART_DELAY = int(os.getenv("RESTART_DELAY", "5"))
-
-JSONBIN_URL = f"https://api.jsonbin.io/v3/b/{JSONBIN_BIN_ID}"
-JSONBIN_HEADERS: dict[str, str] = {
-    "Content-Type": "application/json",
-    "X-Master-Key": JSONBIN_API_KEY or "",
-    "X-Bin-Versioning": "false",
-}
+RESTART_DELAY = int(os.getenv("RESTART_DELAY", "30"))
+TOPGG_TOKEN = os.getenv("TOPGG_TOKEN", "")   # Your Top.gg bot token (optional)
+TOPGG_BOT_ID = os.getenv("TOPGG_BOT_ID", "") # Your bot's Discord ID on Top.gg
+TOPGG_URL = "https://top.gg/bot/{bot_id}/vote"
+DATA_FILE = "data.json"
 
 # =========================================
 
-assert GROQ_API_KEY is not None, "GROQ_API_KEY is not set in .env!"
-assert JSONBIN_API_KEY is not None, "JSONBIN_API_KEY is not set in .env!"
-assert JSONBIN_BIN_ID  is not None, "JSONBIN_BIN_ID is not set in .env!"
 groq_client = Groq(api_key=GROQ_API_KEY)
 
-# ============== PERSISTENT STORAGE (JSONBin) ==================
-# All data lives in a single JSONBin bin. Loaded once on startup,
-# saved automatically every 60 seconds and on graceful shutdown.
-# Nothing is written to disk — safe for disk-constrained hosts.
+# ============== PERSISTENT STORAGE ==================
+# All data is saved to data.json so it survives restarts.
 
-_dirty = False   # True when in-memory data differs from cloud copy
+def load_data():
+    """Load persisted data from disk. Returns defaults if file missing."""
+    if os.path.exists(DATA_FILE):
+        try:
+            with open(DATA_FILE, "r") as f:
+                raw = json.load(f)
+            # JSON keys are always strings — convert user IDs back to int
+            user_points   = {int(k): v for k, v in raw.get("user_points", {}).items()}
+            user_stats_raw = raw.get("user_stats", {})
+            user_stats = {}
+            for k, v in user_stats_raw.items():
+                user_stats[int(k)] = {
+                    "commands_used": v["commands_used"],
+                    "last_seen": datetime.fromisoformat(v["last_seen"])
+                }
+            user_personas = {int(k): v for k, v in raw.get("user_personas", {}).items()}
+            daily_claimed = {int(k): v for k, v in raw.get("daily_claimed", {}).items()}
+            voted_users   = {int(k): v for k, v in raw.get("voted_users", {}).items()}
+            bot_msg_count = raw.get("bot_message_count", 0)
+            return user_points, user_stats, user_personas, daily_claimed, voted_users, bot_msg_count
+        except Exception as e:
+            print(f"⚠️  Could not load data.json: {e}. Starting fresh.")
+    return {}, {}, {}, {}, {}, 0
 
-def _parse_raw(raw: dict) -> tuple[dict, dict, dict, dict]:
-    """Convert a raw JSONBin record into typed in-memory dicts."""
-    user_points = {int(k): v for k, v in raw.get("user_points", {}).items()}
-    user_stats: dict = {}
-    for k, v in raw.get("user_stats", {}).items():
-        user_stats[int(k)] = {
-            "commands_used": v["commands_used"],
-            "last_seen": datetime.fromisoformat(v["last_seen"])
-        }
-    user_personas = {int(k): v for k, v in raw.get("user_personas", {}).items()}
-    daily_claimed = {int(k): v for k, v in raw.get("daily_claimed", {}).items()}
-    return user_points, user_stats, user_personas, daily_claimed
-
-async def load_data_async() -> tuple[dict, dict, dict, dict]:
-    """Fetch data from JSONBin at startup. Returns empty dicts on failure."""
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(
-                JSONBIN_URL, headers=JSONBIN_HEADERS,
-                timeout=aiohttp.ClientTimeout(total=10)
-            ) as resp:
-                if resp.status == 200:
-                    payload = await resp.json()
-                    raw = payload.get("record", {})
-                    result = _parse_raw(raw)
-                    print(f"\u2705 Loaded data from JSONBin ({len(result[0])} point records)")
-                    return result
-                else:
-                    print(f"\u26a0\ufe0f  JSONBin load failed (HTTP {resp.status}) — starting fresh.")
-    except Exception as e:
-        print(f"\u26a0\ufe0f  JSONBin load error: {e} — starting fresh.")
-    return {}, {}, {}, {}
-
-async def save_data_async() -> bool:
-    """Push current in-memory state to JSONBin. Returns True on success."""
-    global _dirty
+def save_data():
+    """Persist all in-memory data to disk."""
     try:
         serializable_stats = {
             str(k): {
@@ -88,39 +66,24 @@ async def save_data_async() -> bool:
             }
             for k, v in user_stats.items()
         }
-        payload = {
-            "user_points":   {str(k): v for k, v in user_points.items()},
-            "user_stats":    serializable_stats,
-            "user_personas": {str(k): v for k, v in user_personas.items()},
-            "daily_claimed": {str(k): v for k, v in daily_claimed.items()},
-        }
-        async with aiohttp.ClientSession() as session:
-            async with session.put(
-                JSONBIN_URL, headers=JSONBIN_HEADERS,
-                json=payload, timeout=aiohttp.ClientTimeout(total=10)
-            ) as resp:
-                if resp.status == 200:
-                    _dirty = False
-                    return True
-                else:
-                    print(f"\u26a0\ufe0f  JSONBin save failed (HTTP {resp.status})")
+        with open(DATA_FILE, "w") as f:
+            json.dump({
+                "user_points":       {str(k): v for k, v in user_points.items()},
+                "user_stats":        serializable_stats,
+                "user_personas":     {str(k): v for k, v in user_personas.items()},
+                "daily_claimed":     {str(k): v for k, v in daily_claimed.items()},
+                "voted_users":       {str(k): v for k, v in voted_users.items()},
+                "bot_message_count": bot_message_count,
+            }, f, indent=2)
     except Exception as e:
-        print(f"\u26a0\ufe0f  JSONBin save error: {e}")
-    return False
+        print(f"⚠️  Could not save data.json: {e}")
 
-def mark_dirty():
-    """Mark data as changed so the auto-save task will pick it up."""
-    global _dirty
-    _dirty = True
-
-# In-memory store — populated at bot startup via on_ready
-user_points:   dict[int, int]  = {}
-user_stats:    dict[int, dict] = {}
-user_personas: dict[int, str]  = {}
-daily_claimed: dict[int, str]  = {}
+# Load at startup
+user_points, user_stats, user_personas, daily_claimed, voted_users, bot_message_count = load_data()
 
 active_trivia = {}   # {guild_id: {answer, category}}
 reminders     = []   # [{user_id, channel_id, message, time}]
+bot_message_count = 0  # total messages Rune has sent (persisted via data.json)
 
 # ============== PERSONAS =================
 
@@ -158,11 +121,6 @@ PERSONAS = {
         "Use lots of energy and positivity! One reply only. "
         "Always reply in the same language the user is writing in."
     ),
-    "leader": (
-        "You are Rune, a confident and inspiring leader bot. Speak with authority and motivation! "
-        "Encourage users to be their best selves. One sentence only. "
-        "Always reply in the same language the user is writing in."
-    )
 }
 
 def get_system_prompt(user_id: int) -> str:
@@ -217,7 +175,7 @@ def clean_output(text: str) -> str:
 
 def add_points(user_id: int, points: int = 1):
     user_points[user_id] = user_points.get(user_id, 0) + points
-    mark_dirty()
+    save_data()
 
 def get_points(user_id: int) -> int:
     return user_points.get(user_id, 0)
@@ -227,7 +185,7 @@ def track_user_activity(user_id: int):
         user_stats[user_id] = {"commands_used": 0, "last_seen": datetime.now()}
     user_stats[user_id]["commands_used"] += 1
     user_stats[user_id]["last_seen"] = datetime.now()
-    mark_dirty()
+    save_data()
 
 # ========== API FUNCTIONS =================
 
@@ -244,37 +202,12 @@ async def get_joke_async():
     except Exception:
         return "😄 Joke generator is taking a break."
 
-FALLBACK_TRIVIA = [
-    {"question": "What is the capital of Australia?", "correct_answer": "Canberra", "incorrect_answers": ["Sydney", "Melbourne", "Brisbane"], "category": "Geography", "difficulty": "medium"},
-    {"question": "How many sides does a hexagon have?", "correct_answer": "6", "incorrect_answers": ["5", "7", "8"], "category": "Mathematics", "difficulty": "easy"},
-    {"question": "What planet is known as the Red Planet?", "correct_answer": "Mars", "incorrect_answers": ["Venus", "Jupiter", "Saturn"], "category": "Science", "difficulty": "easy"},
-    {"question": "Who wrote 'Romeo and Juliet'?", "correct_answer": "William Shakespeare", "incorrect_answers": ["Charles Dickens", "Leo Tolstoy", "Mark Twain"], "category": "Literature", "difficulty": "easy"},
-    {"question": "What is the chemical symbol for gold?", "correct_answer": "Au", "incorrect_answers": ["Ag", "Fe", "Pb"], "category": "Science", "difficulty": "easy"},
-    {"question": "In which year did the Berlin Wall fall?", "correct_answer": "1989", "incorrect_answers": ["1991", "1985", "1993"], "category": "History", "difficulty": "medium"},
-    {"question": "What is the longest river in the world?", "correct_answer": "Nile", "incorrect_answers": ["Amazon", "Yangtze", "Mississippi"], "category": "Geography", "difficulty": "medium"},
-    {"question": "How many bones are in the adult human body?", "correct_answer": "206", "incorrect_answers": ["198", "215", "224"], "category": "Science", "difficulty": "medium"},
-    {"question": "What is the smallest country in the world by area?", "correct_answer": "Vatican City", "incorrect_answers": ["Monaco", "San Marino", "Liechtenstein"], "category": "Geography", "difficulty": "medium"},
-    {"question": "What programming language was created by Guido van Rossum?", "correct_answer": "Python", "incorrect_answers": ["Ruby", "Perl", "Java"], "category": "Technology", "difficulty": "easy"},
-    {"question": "How many planets are in our solar system?", "correct_answer": "8", "incorrect_answers": ["7", "9", "10"], "category": "Science", "difficulty": "easy"},
-    {"question": "What is the fastest land animal?", "correct_answer": "Cheetah", "incorrect_answers": ["Lion", "Greyhound", "Pronghorn"], "category": "Animals", "difficulty": "easy"},
-    {"question": "Which element has the atomic number 1?", "correct_answer": "Hydrogen", "incorrect_answers": ["Helium", "Lithium", "Carbon"], "category": "Science", "difficulty": "easy"},
-    {"question": "What year did World War II end?", "correct_answer": "1945", "incorrect_answers": ["1943", "1944", "1946"], "category": "History", "difficulty": "easy"},
-    {"question": "What is the square root of 144?", "correct_answer": "12", "incorrect_answers": ["11", "13", "14"], "category": "Mathematics", "difficulty": "easy"},
-    {"question": "Which ocean is the largest?", "correct_answer": "Pacific", "incorrect_answers": ["Atlantic", "Indian", "Arctic"], "category": "Geography", "difficulty": "easy"},
-    {"question": "Who painted the Mona Lisa?", "correct_answer": "Leonardo da Vinci", "incorrect_answers": ["Michelangelo", "Raphael", "Botticelli"], "category": "Art", "difficulty": "easy"},
-    {"question": "What is the hardest natural substance on Earth?", "correct_answer": "Diamond", "incorrect_answers": ["Quartz", "Corundum", "Topaz"], "category": "Science", "difficulty": "easy"},
-    {"question": "In what country was the sport of cricket invented?", "correct_answer": "England", "incorrect_answers": ["India", "Australia", "Pakistan"], "category": "Sports", "difficulty": "medium"},
-    {"question": "What does HTTP stand for?", "correct_answer": "HyperText Transfer Protocol", "incorrect_answers": ["High Transfer Text Protocol", "HyperText Transmission Protocol", "Hyper Transfer Text Procedure"], "category": "Technology", "difficulty": "medium"},
-]
-
 async def get_trivia_question():
     try:
         url = "https://opentdb.com/api.php?amount=1&type=multiple"
         async with aiohttp.ClientSession() as session:
-            async with session.get(url, timeout=aiohttp.ClientTimeout(total=6)) as resp:
-                if resp.status == 429:
-                    raise Exception("Rate limited")
-                data = await resp.json(content_type=None)
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=5)) as resp:
+                data = await resp.json()
                 if data["response_code"] == 0:
                     q = data["results"][0]
                     return {
@@ -286,15 +219,7 @@ async def get_trivia_question():
                     }
     except Exception:
         pass
-    # Fallback: pick a random local question
-    q = random.choice(FALLBACK_TRIVIA)
-    return {
-        "question": q["question"],
-        "correct_answer": q["correct_answer"],
-        "all_answers": q["incorrect_answers"] + [q["correct_answer"]],
-        "category": q["category"],
-        "difficulty": q["difficulty"]
-    }
+    return None
 
 async def get_cat_fact():
     try:
@@ -341,36 +266,14 @@ async def get_meme():
     except Exception:
         return None
 
-ACTIVITY_SUGGESTIONS = [
-    "Go for a 20-minute walk outside 🚶",
-    "Learn three new facts about a country you've never visited 🌍",
-    "Write down 5 things you're grateful for today 📝",
-    "Try cooking a recipe you've never made before 🍳",
-    "Call or message a friend you haven't spoken to in a while 📞",
-    "Do a 10-minute meditation or deep-breathing session 🧘",
-    "Sketch or doodle something without worrying about the result 🎨",
-    "Read a chapter of a book you've been putting off 📖",
-    "Organize one drawer or shelf in your home 🗂️",
-    "Watch a documentary on a topic you know nothing about 🎬",
-    "Learn 10 words in a new language 🗣️",
-    "Do 20 push-ups, squats, or jumping jacks 💪",
-    "Write a short poem about your day ✍️",
-    "Try a new genre of music and make a playlist 🎵",
-    "Play a puzzle, chess, or a brain teaser game 🧩",
-    "Plant something — even a windowsill herb counts 🌱",
-    "Write a letter to your future self 📬",
-    "Watch a TED Talk on something you've always been curious about 💡",
-    "Try drawing a self-portrait — no artistic skill required! 😄",
-    "Plan your ideal dream trip, even if it's just in your head ✈️",
-    "Do a random act of kindness for someone nearby 💙",
-    "Bake something sweet and share it 🍪",
-    "Set a 15-minute timer and declutter your desktop or phone 📱",
-    "Stargaze or watch the sunset/sunrise tonight 🌅",
-    "Try a new sport or physical activity for 30 minutes 🏸",
-]
-
 async def get_activity_suggestion():
-    return random.choice(ACTIVITY_SUGGESTIONS)
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get("https://www.boredapi.com/api/activity", timeout=aiohttp.ClientTimeout(total=5)) as resp:
+                data = await resp.json()
+                return data.get("activity", "Try something new today!")
+    except Exception:
+        return "Try something new today!"
 
 # ========== AI REPLY =================
 
@@ -396,6 +299,46 @@ def generate_reply(user_message: str, system_prompt: str) -> str:
         return "🤔 I'm not sure how to answer that."
     return reply
 
+# ========== TOP.GG VOTE NUDGE ===================
+
+VOTE_MESSAGES = [
+    "💙 Enjoying Rune? A quick vote on **Top.gg** helps more people find me — and voters get **+50 bonus points**!",
+    "🚀 Want to help Rune grow? Vote on **Top.gg** — it only takes 2 seconds and you earn **+50 bonus points**!",
+    "⭐ Every vote on **Top.gg** really helps! Voted users get a sweet **+50 point bonus** as a thank-you!",
+    "🎉 Fun fact: you can vote for Rune on **Top.gg** every 12 hours and earn **+50 points** each time!",
+]
+
+def build_vote_embed(bot_id: str) -> discord.Embed:
+    url = f"https://top.gg/bot/{bot_id}/vote" if bot_id else "https://top.gg"
+    desc = (
+        f"**[Click here to vote!]({url})**\n\n"
+        "Voting is free, takes 2 seconds, and you can do it every **12 hours**.\n\n"
+        "🎁 **Reward:** Use `/checkvote` after voting to claim **+50 bonus points**!"
+    )
+    embed = discord.Embed(
+        title="⭐ Vote for Rune on Top.gg!",
+        description=desc,
+        color=discord.Color.from_rgb(255, 0, 119)
+    )
+    embed.set_footer(text="Your votes help Rune reach more servers 💙")
+    return embed
+
+async def check_topgg_vote(user_id: int) -> bool:
+    """Returns True if the user has voted on Top.gg in the last 12 hours."""
+    if not TOPGG_TOKEN or not TOPGG_BOT_ID:
+        return False
+    try:
+        url = f"https://top.gg/api/bots/{TOPGG_BOT_ID}/check?userId={user_id}"
+        headers = {"Authorization": TOPGG_TOKEN}
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=5)) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    return bool(data.get("voted", 0))
+    except Exception as e:
+        print(f"Top.gg API error: {e}")
+    return False
+
 # ========== BOT FACTORY ===================
 
 def create_bot():
@@ -407,11 +350,16 @@ def create_bot():
 
     @bot.event
     async def on_ready():
-        global user_points, user_stats, user_personas, daily_claimed
-        # Load data from JSONBin on startup
-        user_points, user_stats, user_personas, daily_claimed = await load_data_async()
-
-        # Sync slash commands
+        # ---------------------------------------------------------------
+        # SLASH COMMAND SYNC STRATEGY
+        # ---------------------------------------------------------------
+        # During development set DEV_GUILD_ID in your .env to your server's
+        # ID. Guild-scoped commands update INSTANTLY — no re-invite needed.
+        # For production (DEV_GUILD_ID not set) we sync globally; Discord
+        # can take up to 1 hour to propagate changes everywhere, but you
+        # still NEVER need to re-invite the bot for new commands.
+        # ---------------------------------------------------------------
+        # Wipe stale guild-specific commands from every server, then global sync
         for g in bot.guilds:
             bot.tree.clear_commands(guild=g)
             await bot.tree.sync(guild=g)
@@ -419,39 +367,9 @@ def create_bot():
         print("✅ Slash commands synced globally")
 
         check_reminders.start()
-        auto_save.start()
         print(f"✅ Bot online as {bot.user}")
         print(f"📊 Serving {len(bot.guilds)} servers")
-        print(f"☁️  Storage: JSONBin ({len(user_points)} point records loaded)")
-
-    @bot.tree.error
-    async def on_app_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
-        if isinstance(error, app_commands.CommandOnCooldown):
-            try:
-                await interaction.response.send_message(
-                    f"⏳ Slow down! Try again in **{error.retry_after:.1f}s**.", ephemeral=True
-                )
-            except Exception:
-                pass
-            return
-        if isinstance(error, app_commands.MissingPermissions):
-            try:
-                await interaction.response.send_message("❌ You don't have permission for that!", ephemeral=True)
-            except Exception:
-                pass
-            return
-        inner = getattr(error, "original", error)
-        if isinstance(inner, discord.HTTPException) and inner.status == 429:
-            print(f"⚠️  Discord 429 on command — Cloudflare may be rate-limiting this IP")
-            return
-        traceback.print_exc()
-        try:
-            if not interaction.response.is_done():
-                await interaction.response.send_message("⚠️ Something went wrong. Please try again!", ephemeral=True)
-            else:
-                await interaction.followup.send("⚠️ Something went wrong. Please try again!", ephemeral=True)
-        except Exception:
-            pass
+        print(f"💾 Loaded {len(user_points)} user point records from disk")
 
     @bot.event
     async def on_message(message):
@@ -488,12 +406,23 @@ def create_bot():
                 traceback.print_exc()
                 reply = "⚠️ AI crashed. Please try again."
 
+        global bot_message_count
+        bot_message_count += 1
         await message.channel.send(reply)
+
+        # Every 25 bot messages, drop a vote nudge
+        if bot_message_count % 25 == 0:
+            await asyncio.sleep(1.5)  # small delay so it doesn't feel instant
+            vote_embed = build_vote_embed(TOPGG_BOT_ID)
+            await message.channel.send(
+                random.choice(VOTE_MESSAGES),
+                embed=vote_embed
+            )
+            save_data()
 
     # ========== SLASH COMMANDS =================
 
     @bot.tree.command(name="joke", description="Get a random joke 😂")
-    @app_commands.checks.cooldown(1, 5, key=lambda i: i.user.id)
     async def joke(interaction: discord.Interaction):
         await interaction.response.defer()
         joke_text = await get_joke_async()
@@ -519,13 +448,15 @@ def create_bot():
     # ========== TRIVIA VIEW (buttons, lockout, 5-min timer) =================
 
     class TriviaView(discord.ui.View):
+        message: discord.Message
+
         def __init__(self, guild_id: int, correct: str, answers: list[str], question_data: dict):
             super().__init__(timeout=300)  # 5 minutes
             self.guild_id   = guild_id
             self.correct    = correct
             self.answered   = False          # True once someone is correct
-            self.wrong_ids  = set()          # users who already guessed wrong
-            self.message: discord.Message | None = None  # set after send so we can edit on timeout
+            self.wrong_ids: set[int] = set() # users who already guessed wrong
+            self.message    = None           # set after send so we can edit on timeout
 
             letters = ["A", "B", "C", "D"]
             for i, ans in enumerate(answers):
@@ -557,18 +488,17 @@ def create_bot():
                     add_points(interaction.user.id, 10)
                     # Disable all buttons and mark correct one green
                     for item in self.children:
-                        if isinstance(item, discord.ui.Button):
-                            item.disabled = True
-                            if item.label and item.label.split(". ", 1)[-1] == answer[:80]:
-                                item.style = discord.ButtonStyle.success
-                            else:
-                                item.style = discord.ButtonStyle.secondary
+                        btn = item  # type: ignore[assignment]
+                        btn.disabled = True
+                        if btn.label and btn.label.split(". ", 1)[-1] == answer[:80]:
+                            btn.style = discord.ButtonStyle.success
+                        else:
+                            btn.style = discord.ButtonStyle.secondary
                     self.stop()
-                    if self.message:
-                        embed = self.message.embeds[0]
-                        embed.color = discord.Color.green()
-                        embed.set_footer(text=f"✅ {interaction.user.display_name} got it right! +10 points")
-                        await interaction.response.edit_message(embed=embed, view=self)
+                    embed = self.message.embeds[0]
+                    embed.color = discord.Color.green()
+                    embed.set_footer(text=f"✅ {interaction.user.display_name} got it right! +10 points")
+                    await interaction.response.edit_message(embed=embed, view=self)
                     await interaction.followup.send(
                         f"🎉 **{interaction.user.mention}** answered correctly and earned **10 points**!\n"
                         f"Total: **{get_points(interaction.user.id)}** points"
@@ -576,63 +506,53 @@ def create_bot():
                 else:
                     # Wrong — lock this user out silently (only they see it)
                     self.wrong_ids.add(interaction.user.id)
-                    try:
-                        await interaction.response.send_message(
-                            "❌ **Wrong answer!** You're locked out of this question.", ephemeral=True
-                        )
-                    except discord.HTTPException:
-                        pass
+                    await interaction.response.send_message(
+                        "❌ **Wrong answer!** You're locked out of this question.", ephemeral=True
+                    )
             return callback
 
         async def on_timeout(self):
             self.answered = True
             active_trivia.pop(self.guild_id, None)
             for item in self.children:
-                if isinstance(item, discord.ui.Button):
-                    item.disabled = True
-                    if item.label and item.label.split(". ", 1)[-1] == self.correct[:80]:
-                        item.style = discord.ButtonStyle.success
-                    else:
-                        item.style = discord.ButtonStyle.secondary
-            if self.message:
-                embed = self.message.embeds[0]
+                btn = item  # type: ignore[assignment]
+                btn.disabled = True
+                if btn.label and btn.label.split(". ", 1)[-1] == self.correct[:80]:
+                    btn.style = discord.ButtonStyle.success
+                else:
+                    btn.style = discord.ButtonStyle.secondary
+            msg = getattr(self, "message", None)
+            if msg is not None:
+                embed = msg.embeds[0]
                 embed.color = discord.Color.red()
                 embed.set_footer(text=f"⏰ Time's up! The answer was: {self.correct}")
                 try:
-                    await self.message.edit(embed=embed, view=self)
-                    await self.message.channel.send(
+                    await msg.edit(embed=embed, view=self)
+                    await msg.channel.send(
                         f"⏰ **Nobody got it!** The correct answer was: **{self.correct}**"
                     )
                 except Exception:
                     pass
 
     @bot.tree.command(name="trivia", description="Start a trivia question! 🧠")
-    @app_commands.checks.cooldown(1, 10, key=lambda i: i.guild_id)
     async def trivia(interaction: discord.Interaction):
         await interaction.response.defer()
-        guild = interaction.guild
-        if not guild:
-            await interaction.followup.send("This command can only be used in a server.", ephemeral=True)
-            return
-        if guild.id in active_trivia:
-            try:
-                await interaction.followup.send("❌ A trivia question is already active! Finish it first.")
-            except discord.HTTPException:
-                pass
+        if interaction.guild and interaction.guild.id in active_trivia:
+            await interaction.followup.send("❌ A trivia question is already active! Finish it first.")
             return
         question_data = await get_trivia_question()
         if not question_data:
-            try:
-                await interaction.followup.send("⚠️ Couldn't fetch a trivia question. Try again!")
-            except discord.HTTPException:
-                pass
+            await interaction.followup.send("⚠️ Couldn't fetch a trivia question. Try again!")
             return
 
         correct  = question_data["correct_answer"]
         answers  = question_data["all_answers"][:]
         random.shuffle(answers)
 
-        active_trivia[guild.id] = {"answer": correct, "category": question_data["category"]}
+        if not interaction.guild:
+            await interaction.followup.send("This command can only be used in a server.")
+            return
+        active_trivia[interaction.guild.id] = {"answer": correct, "category": question_data["category"]}
 
         diff_colors = {"easy": discord.Color.green(), "medium": discord.Color.orange(), "hard": discord.Color.red()}
         color = diff_colors.get(question_data["difficulty"], discord.Color.blue())
@@ -647,30 +567,12 @@ def create_bot():
         embed.add_field(name="⏳ Time Limit",  value="5 minutes",                             inline=True)
         embed.set_footer(text="Press a button to answer! Wrong answers lock you out.")
 
-        view = TriviaView(guild.id, correct, answers, question_data)
-        try:
-            msg  = await interaction.followup.send(embed=embed, view=view)
-            view.message = msg
-        except discord.HTTPException as e:
-            active_trivia.pop(guild.id, None)
-            print(f"⚠️  Could not send trivia message: {e}")
-            return
+        view = TriviaView(interaction.guild.id, correct, answers, question_data)
+        msg  = await interaction.followup.send(embed=embed, view=view)
+        view.message = msg
         track_user_activity(interaction.user.id)
 
-    @bot.tree.command(name="resettrivia", description="Force-reset a stuck trivia question 🔄 (Mod only)")
-    @app_commands.checks.has_permissions(manage_messages=True)
-    async def resettrivia(interaction: discord.Interaction):
-        guild = interaction.guild
-        if not guild:
-            await interaction.response.send_message("This command can only be used in a server.", ephemeral=True)
-            return
-        if guild.id in active_trivia:
-            active_trivia.pop(guild.id)
-            await interaction.response.send_message("✅ Active trivia question has been reset. You can start a new one!", ephemeral=True)
-        else:
-            await interaction.response.send_message("ℹ️ There's no active trivia question to reset.", ephemeral=True)
-
-
+    @bot.tree.command(name="points", description="Check your points or someone else's 🏆")
     @app_commands.describe(user="User to check points for (optional)")
     async def points(interaction: discord.Interaction, user: Optional[discord.User] = None):
         target = user or interaction.user
@@ -740,7 +642,8 @@ def create_bot():
             return
         bonus = random.randint(15, 50)
         daily_claimed[uid] = now_str
-        add_points(uid, bonus)
+        add_points(uid, bonus)  # also calls save_data()
+        save_data()
         embed = discord.Embed(
             title="🌅 Daily Bonus!",
             description=f"You claimed **{bonus}** bonus points!\nTotal: **{get_points(uid)}** points",
@@ -794,6 +697,8 @@ def create_bot():
     # ========== POLL VIEW (buttons, live counts, close button) =================
 
     class PollView(discord.ui.View):
+        message: discord.Message
+
         def __init__(self, options: list[str], creator_id: int):
             super().__init__(timeout=86400)  # polls live for 24h max
             self.options     = options
@@ -801,7 +706,7 @@ def create_bot():
             self.votes: dict[int, int] = {}   # user_id -> option index
             self.counts = [0] * len(options)
             self.closed  = False
-            self.message: discord.Message | None = None
+            self.message = None  # type: ignore[assignment]
 
             letters = ["🇦", "🇧", "🇨", "🇩"]
             for i, opt in enumerate(options):
@@ -864,8 +769,8 @@ def create_bot():
             self.closed = True
             self.stop()
             for item in self.children:
-                if isinstance(item, discord.ui.Button):
-                    item.disabled = True
+                b = item  # type: ignore[assignment]
+                b.disabled = True
             await self._refresh_embed(interaction, closed=True)
 
         def _build_embed(self, closed: bool = False) -> discord.Embed:
@@ -878,9 +783,9 @@ def create_bot():
                 bar   = "█" * int(pct / 10) + "░" * (10 - int(pct / 10))
                 desc_lines.append(f"{letters[i]} **{opt}**\n`{bar}` {count} vote{'s' if count != 1 else ''} ({pct:.1f}%)\n")
             status = "🔒 Poll Closed" if closed else "📊 Poll Active"
-            title = self.message.embeds[0].title if self.message and self.message.embeds else "📊 Poll"
+            msg = getattr(self, "message", None)
             embed = discord.Embed(
-                title=title,
+                title=msg.embeds[0].title if msg else "📊 Poll",
                 description="\n".join(desc_lines),
                 color=discord.Color.greyple() if closed else discord.Color.blurple()
             )
@@ -892,8 +797,10 @@ def create_bot():
             try:
                 if closed:
                     await interaction.response.edit_message(embed=embed, view=self)
-                elif self.message:
-                    await self.message.edit(embed=embed, view=self)
+                else:
+                    msg = getattr(self, "message", None)
+                    if msg:
+                        await msg.edit(embed=embed, view=self)
             except Exception:
                 pass
 
@@ -927,8 +834,7 @@ def create_bot():
 
         view = PollView(options, interaction.user.id)
         await interaction.response.send_message(embed=embed, view=view)
-        msg = await interaction.original_response()
-        view.message = msg  # type: ignore[assignment]  # InteractionMessage is compatible at runtime
+        view.message = await interaction.original_response()
         track_user_activity(interaction.user.id)
 
     @bot.tree.command(name="serverinfo", description="View info about this server 🏠")
@@ -950,7 +856,6 @@ def create_bot():
         track_user_activity(interaction.user.id)
 
     @bot.tree.command(name="catfact", description="Get a random cat fact 🐱")
-    @app_commands.checks.cooldown(1, 8, key=lambda i: i.user.id)
     async def catfact(interaction: discord.Interaction):
         await interaction.response.defer()
         fact = await get_cat_fact()
@@ -959,7 +864,6 @@ def create_bot():
         track_user_activity(interaction.user.id)
 
     @bot.tree.command(name="dog", description="Get a random dog picture 🐕")
-    @app_commands.checks.cooldown(1, 8, key=lambda i: i.user.id)
     async def dog(interaction: discord.Interaction):
         await interaction.response.defer()
         image_url = await get_dog_image()
@@ -1051,9 +955,6 @@ def create_bot():
         if minutes < 1 or minutes > 1440:
             await interaction.response.send_message("❌ Please set a reminder between 1 and 1440 minutes!")
             return
-        if not isinstance(interaction.channel, (discord.TextChannel, discord.Thread, discord.DMChannel, discord.VoiceChannel)):
-            await interaction.response.send_message("❌ Can't set reminders in this channel type!", ephemeral=True)
-            return
         remind_time = datetime.now() + timedelta(minutes=minutes)
         reminders.append({
             "user_id": interaction.user.id,
@@ -1091,11 +992,10 @@ def create_bot():
         app_commands.Choice(name="Shakespeare 📜", value="shakespeare"),
         app_commands.Choice(name="Robot 🤖", value="robot"),
         app_commands.Choice(name="Cheerful 🎉", value="cheerful"),
-        app_commands.Choice(name="Leader 🏆", value="leader")
     ])
     async def persona(interaction: discord.Interaction, style: str):
         user_personas[interaction.user.id] = style
-        mark_dirty()
+        save_data()
         descriptions = {
             "default": "Back to normal — helpful and friendly! 😊",
             "sarcastic": "Oh great, you picked sarcastic. Wonderful choice. 🙄",
@@ -1103,7 +1003,6 @@ def create_bot():
             "shakespeare": "Henceforth, I shall speaketh in the tongue of the Bard! 📜",
             "robot": "ACKNOWLEDGED. SWITCHING TO ROBOT MODE. BEEP BOOP. 🤖",
             "cheerful": "YAY! I'm SO excited to be super cheerful for you! 🎉✨",
-            "leader": "I shall conquer the world!"
         }
         embed = discord.Embed(
             title="🎭 Persona Changed!",
@@ -1120,8 +1019,7 @@ def create_bot():
     @app_commands.describe(user="The user to kick", reason="Reason for kick (optional)")
     @app_commands.checks.has_permissions(kick_members=True)
     async def kick(interaction: discord.Interaction, user: discord.Member, reason: Optional[str] = "No reason provided"):
-        assert interaction.guild is not None
-        if user.top_role >= interaction.guild.me.top_role:
+        if interaction.guild and interaction.guild.me and user.top_role >= interaction.guild.me.top_role:
             await interaction.response.send_message("❌ I can't kick someone with a higher or equal role than me!", ephemeral=True)
             return
         if user == interaction.user:
@@ -1145,8 +1043,7 @@ def create_bot():
     @app_commands.describe(user="The user to ban", reason="Reason for ban (optional)", delete_days="Days of messages to delete (0-7)")
     @app_commands.checks.has_permissions(ban_members=True)
     async def ban(interaction: discord.Interaction, user: discord.Member, reason: Optional[str] = "No reason provided", delete_days: int = 0):
-        assert interaction.guild is not None
-        if user.top_role >= interaction.guild.me.top_role:
+        if interaction.guild and interaction.guild.me and user.top_role >= interaction.guild.me.top_role:
             await interaction.response.send_message("❌ I can't ban someone with a higher or equal role than me!", ephemeral=True)
             return
         if user == interaction.user:
@@ -1171,8 +1068,7 @@ def create_bot():
     @app_commands.describe(user="The user to mute", minutes="Duration in minutes (max 40320 = 28 days)", reason="Reason (optional)")
     @app_commands.checks.has_permissions(moderate_members=True)
     async def mute(interaction: discord.Interaction, user: discord.Member, minutes: int = 10, reason: Optional[str] = "No reason provided"):
-        assert interaction.guild is not None
-        if user.top_role >= interaction.guild.me.top_role:
+        if interaction.guild and interaction.guild.me and user.top_role >= interaction.guild.me.top_role:
             await interaction.response.send_message("❌ I can't mute someone with a higher or equal role than me!", ephemeral=True)
             return
         if user == interaction.user:
@@ -1210,6 +1106,92 @@ def create_bot():
         if isinstance(error, app_commands.MissingPermissions):
             await interaction.response.send_message("❌ You need the **Moderate Members** permission to use this!", ephemeral=True)
 
+    # ========== TOP.GG VOTE COMMANDS =================
+
+    @bot.tree.command(name="checkvote", description="Claim your Top.gg vote reward! 🗳️")
+    async def checkvote(interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        uid = interaction.user.id
+        vote_url = f"https://top.gg/bot/{TOPGG_BOT_ID}/vote" if TOPGG_BOT_ID else "https://top.gg"
+
+        # Check cooldown — Top.gg votes are valid for 12 hours
+        now = datetime.now()
+        last_vote_claim = voted_users.get(uid)
+        if last_vote_claim:
+            last_dt = datetime.fromisoformat(last_vote_claim)
+            if (now - last_dt).total_seconds() < 43200:  # 12 hours
+                remaining = timedelta(seconds=43200) - (now - last_dt)
+                h, m = divmod(int(remaining.total_seconds()), 3600)
+                m = m // 60
+                await interaction.followup.send(
+                    f"⏳ You already claimed your vote reward! Come back in **{h}h {m}m**.",
+                    ephemeral=True
+                )
+                return
+
+        # Check Top.gg API
+        has_voted = await check_topgg_vote(uid)
+
+        if not has_voted and TOPGG_TOKEN:
+            no_vote_desc = (
+                "Looks like you haven't voted yet!\n\n"
+                f"**[Vote here → Top.gg]({vote_url})**\n\n"
+                "After voting, come back and run `/checkvote` again to claim your reward!"
+            )
+            embed = discord.Embed(
+                title="❌ No vote found",
+                description=no_vote_desc,
+                color=discord.Color.red()
+            )
+            await interaction.followup.send(embed=embed, ephemeral=True)
+            return
+
+        # No API token configured — trust user (honor system) or inform
+        if not TOPGG_TOKEN:
+            not_cfg_desc = (
+                "The bot owner hasn't set up automatic vote verification yet.\n\n"
+                f"**[Vote here → Top.gg]({vote_url})**\n\n"
+                "Ask the bot owner to add `TOPGG_TOKEN` and `TOPGG_BOT_ID` to the `.env` file!"
+            )
+            embed = discord.Embed(
+                title="⚙️ Vote verification not configured",
+                description=not_cfg_desc,
+                color=discord.Color.orange()
+            )
+            await interaction.followup.send(embed=embed, ephemeral=True)
+            return
+
+        # Award the reward
+        bonus = 50
+        voted_users[uid] = now.isoformat()
+        add_points(uid, bonus)
+        save_data()
+
+        reward_desc = (
+            "Thank you for voting for Rune on Top.gg! 💙\n\n"
+            f"You received **+{bonus} bonus points**!\n"
+            f"Total points: **{get_points(uid)}**\n\n"
+            "You can vote again in **12 hours**."
+        )
+        embed = discord.Embed(
+            title="🎉 Vote reward claimed!",
+            description=reward_desc,
+            color=discord.Color.green()
+        )
+        embed.set_footer(text="Voting helps Rune reach more servers!")
+        await interaction.followup.send(embed=embed, ephemeral=True)
+        track_user_activity(uid)
+
+    @bot.tree.command(name="vote", description="Vote for Rune on Top.gg and earn bonus points! 🗳️")
+    async def vote(interaction: discord.Interaction):
+        vote_url = f"https://top.gg/bot/{TOPGG_BOT_ID}/vote" if TOPGG_BOT_ID else "https://top.gg"
+        embed = build_vote_embed(TOPGG_BOT_ID)
+        await interaction.response.send_message(
+            f"Thanks for supporting Rune! 💙 After voting, use `/checkvote` to claim your **+50 points**!",
+            embed=embed
+        )
+        track_user_activity(interaction.user.id)
+
     # ========== HELP COMMAND =================
 
     @bot.tree.command(name="help", description="View all available commands 📖")
@@ -1226,8 +1208,9 @@ def create_bot():
             ("🐾 **Animals**", "`/catfact`, `/dog`"),
             ("💡 **Inspiration**", "`/advice`, `/quote`, `/activity`"),
             ("🎭 **AI Persona**", "`/persona` — Change how Rune talks to you (your choice is private!)"),
-            ("🛡️ **Moderation**", "`/kick`, `/ban`, `/mute`, `/unmute`, `/resettrivia` *(requires permissions)*"),
+            ("🛡️ **Moderation**", "`/kick`, `/ban`, `/mute`, `/unmute` *(requires permissions)*"),
             ("⏰ **Utility**", "`/remind`, `/stats`, `/serverinfo`, `/help`"),
+            ("🗳️ **Vote**", "`/vote` — Vote for Rune on Top.gg | `/checkvote` — Claim your **+50 point** vote reward!"),
             ("💬 **AI Chat**", f"Use `{PREFIX}` prefix to chat with AI (e.g., `{PREFIX}hello`)"),
         ]
         for category, cmds in commands_list:
@@ -1245,20 +1228,12 @@ def create_bot():
                 try:
                     channel = bot.get_channel(reminder["channel_id"])
                     user = await bot.fetch_user(reminder["user_id"])
-                    if isinstance(channel, (discord.TextChannel, discord.Thread, discord.DMChannel, discord.VoiceChannel)):
+                    if channel and isinstance(channel, discord.TextChannel):
                         await channel.send(f"⏰ {user.mention} Reminder: **{reminder['message']}**")
                     reminders.remove(reminder)
                 except Exception as e:
                     print(f"Error sending reminder: {e}")
                     reminders.remove(reminder)
-
-    @tasks.loop(seconds=60)
-    async def auto_save():
-        """Persist data to JSONBin every 60 seconds if anything changed."""
-        if _dirty:
-            success = await save_data_async()
-            if success:
-                print("☁️  Auto-saved data to JSONBin.")
 
     return bot
 
@@ -1268,8 +1243,7 @@ def run_forever():
     while True:
         try:
             bot = create_bot()
-            assert DISCORD_TOKEN is not None, "DISCORD_TOKEN is not set in .env!"
-            bot.run(DISCORD_TOKEN)
+            bot.run(DISCORD_TOKEN or "")
         except Exception:
             print("🔴 BOT CRASHED:")
             traceback.print_exc()
