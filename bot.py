@@ -285,7 +285,7 @@ def generate_reply(user_message: str, system_prompt: str) -> str:
             {"role": "user", "content": user_message}
         ],
         temperature=1,
-        max_completion_tokens=8192,
+        max_completion_tokens=8000,
         top_p=1,
         reasoning_effort="medium",
         stream=True,
