@@ -16,74 +16,107 @@ from dotenv import load_dotenv
 # ================= LOAD ENV =================
 load_dotenv()
 
-DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
-GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-PREFIX = os.getenv("PREFIX", ".")
-RESTART_DELAY = int(os.getenv("RESTART_DELAY", "30"))
-TOPGG_TOKEN = os.getenv("TOPGG_TOKEN", "")   # Your Top.gg bot token (optional)
-TOPGG_BOT_ID = os.getenv("TOPGG_BOT_ID", "") # Your bot's Discord ID on Top.gg
-TOPGG_URL = "https://top.gg/bot/{bot_id}/vote"
-DATA_FILE = "data.json"
+DISCORD_TOKEN  = os.getenv("DISCORD_TOKEN")
+GROQ_API_KEY   = os.getenv("GROQ_API_KEY")
+JSONBIN_API_KEY = os.getenv("JSONBIN_API_KEY")   # X-Master-Key from jsonbin.io
+JSONBIN_BIN_ID  = os.getenv("JSONBIN_BIN_ID")    # Bin ID from jsonbin.io
+PREFIX         = os.getenv("PREFIX", ".")
+RESTART_DELAY  = int(os.getenv("RESTART_DELAY", "30"))
+TOPGG_TOKEN    = os.getenv("TOPGG_TOKEN", "")
+TOPGG_BOT_ID   = os.getenv("TOPGG_BOT_ID", "")
+TOPGG_URL      = "https://top.gg/bot/{bot_id}/vote"
+
+JSONBIN_URL = f"https://api.jsonbin.io/v3/b/{JSONBIN_BIN_ID}"
+JSONBIN_HEADERS: dict[str, str] = {
+    "Content-Type":    "application/json",
+    "X-Master-Key":    JSONBIN_API_KEY or "",
+    "X-Bin-Versioning": "false",
+}
 
 # =========================================
 
+assert GROQ_API_KEY   is not None, "GROQ_API_KEY is not set in .env!"
+assert JSONBIN_API_KEY is not None, "JSONBIN_API_KEY is not set in .env!"
+assert JSONBIN_BIN_ID  is not None, "JSONBIN_BIN_ID is not set in .env!"
 groq_client = Groq(api_key=GROQ_API_KEY)
 
-# ============== PERSISTENT STORAGE ==================
-# All data is saved to data.json so it survives restarts.
+# ============== PERSISTENT STORAGE (JSONBin) ==================
+# All data lives in a single JSONBin bin — nothing written to disk.
+# Auto-saved every 60 s if dirty; loaded once at startup.
 
-def load_data():
-    """Load persisted data from disk. Returns defaults if file missing."""
-    if os.path.exists(DATA_FILE):
-        try:
-            with open(DATA_FILE, "r") as f:
-                raw = json.load(f)
-            # JSON keys are always strings — convert user IDs back to int
-            user_points   = {int(k): v for k, v in raw.get("user_points", {}).items()}
-            user_stats_raw = raw.get("user_stats", {})
-            user_stats = {}
-            for k, v in user_stats_raw.items():
-                user_stats[int(k)] = {
-                    "commands_used": v["commands_used"],
-                    "last_seen": datetime.fromisoformat(v["last_seen"])
-                }
-            user_personas = {int(k): v for k, v in raw.get("user_personas", {}).items()}
-            daily_claimed = {int(k): v for k, v in raw.get("daily_claimed", {}).items()}
-            voted_users   = {int(k): v for k, v in raw.get("voted_users", {}).items()}
-            bot_msg_count = raw.get("bot_message_count", 0)
-            return user_points, user_stats, user_personas, daily_claimed, voted_users, bot_msg_count
-        except Exception as e:
-            print(f"⚠️  Could not load data.json: {e}. Starting fresh.")
+_dirty = False
+
+def _parse_raw(raw: dict) -> tuple[dict, dict, dict, dict, dict, int]:
+    user_points = {int(k): v for k, v in raw.get("user_points", {}).items()}
+    user_stats: dict = {}
+    for k, v in raw.get("user_stats", {}).items():
+        user_stats[int(k)] = {
+            "commands_used": v["commands_used"],
+            "last_seen": datetime.fromisoformat(v["last_seen"])
+        }
+    user_personas  = {int(k): v for k, v in raw.get("user_personas",  {}).items()}
+    daily_claimed  = {int(k): v for k, v in raw.get("daily_claimed",  {}).items()}
+    voted_users    = {int(k): v for k, v in raw.get("voted_users",    {}).items()}
+    bot_msg_count  = int(raw.get("bot_message_count", 0))
+    return user_points, user_stats, user_personas, daily_claimed, voted_users, bot_msg_count
+
+async def load_data_async() -> tuple[dict, dict, dict, dict, dict, int]:
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                JSONBIN_URL, headers=JSONBIN_HEADERS,
+                timeout=aiohttp.ClientTimeout(total=10)
+            ) as resp:
+                if resp.status == 200:
+                    payload = await resp.json()
+                    result = _parse_raw(payload.get("record", {}))
+                    print(f"✅ Loaded data from JSONBin ({len(result[0])} point records)")
+                    return result
+                print(f"⚠️  JSONBin load HTTP {resp.status} — starting fresh.")
+    except Exception as e:
+        print(f"⚠️  JSONBin load error: {e} — starting fresh.")
     return {}, {}, {}, {}, {}, 0
 
-def save_data():
-    """Persist all in-memory data to disk."""
+async def save_data_async() -> bool:
+    global _dirty
     try:
-        serializable_stats = {
-            str(k): {
-                "commands_used": v["commands_used"],
-                "last_seen": v["last_seen"].isoformat()
-            }
-            for k, v in user_stats.items()
+        payload = {
+            "user_points":       {str(k): v for k, v in user_points.items()},
+            "user_stats":        {str(k): {"commands_used": v["commands_used"],
+                                            "last_seen": v["last_seen"].isoformat()}
+                                  for k, v in user_stats.items()},
+            "user_personas":     {str(k): v for k, v in user_personas.items()},
+            "daily_claimed":     {str(k): v for k, v in daily_claimed.items()},
+            "voted_users":       {str(k): v for k, v in voted_users.items()},
+            "bot_message_count": bot_message_count,
         }
-        with open(DATA_FILE, "w") as f:
-            json.dump({
-                "user_points":       {str(k): v for k, v in user_points.items()},
-                "user_stats":        serializable_stats,
-                "user_personas":     {str(k): v for k, v in user_personas.items()},
-                "daily_claimed":     {str(k): v for k, v in daily_claimed.items()},
-                "voted_users":       {str(k): v for k, v in voted_users.items()},
-                "bot_message_count": bot_message_count,
-            }, f, indent=2)
+        async with aiohttp.ClientSession() as session:
+            async with session.put(
+                JSONBIN_URL, headers=JSONBIN_HEADERS,
+                json=payload, timeout=aiohttp.ClientTimeout(total=10)
+            ) as resp:
+                if resp.status == 200:
+                    _dirty = False
+                    return True
+                print(f"⚠️  JSONBin save HTTP {resp.status}")
     except Exception as e:
-        print(f"⚠️  Could not save data.json: {e}")
+        print(f"⚠️  JSONBin save error: {e}")
+    return False
 
-# Load at startup
-user_points, user_stats, user_personas, daily_claimed, voted_users, bot_message_count = load_data()
+def mark_dirty():
+    global _dirty
+    _dirty = True
 
-active_trivia = {}   # {guild_id: {answer, category}}
-reminders     = []   # [{user_id, channel_id, message, time}]
-bot_message_count = 0  # total messages Rune has sent (persisted via data.json)
+# In-memory store — populated in on_ready via load_data_async()
+user_points:      dict[int, int]  = {}
+user_stats:       dict[int, dict] = {}
+user_personas:    dict[int, str]  = {}
+daily_claimed:    dict[int, str]  = {}
+voted_users:      dict[int, str]  = {}
+bot_message_count: int            = 0
+
+active_trivia = {}
+reminders     = []
 
 # ============== PERSONAS =================
 
@@ -175,7 +208,7 @@ def clean_output(text: str) -> str:
 
 def add_points(user_id: int, points: int = 1):
     user_points[user_id] = user_points.get(user_id, 0) + points
-    save_data()
+    mark_dirty()
 
 def get_points(user_id: int) -> int:
     return user_points.get(user_id, 0)
@@ -185,7 +218,7 @@ def track_user_activity(user_id: int):
         user_stats[user_id] = {"commands_used": 0, "last_seen": datetime.now()}
     user_stats[user_id]["commands_used"] += 1
     user_stats[user_id]["last_seen"] = datetime.now()
-    save_data()
+    mark_dirty()
 
 # ========== API FUNCTIONS =================
 
@@ -202,24 +235,69 @@ async def get_joke_async():
     except Exception:
         return "😄 Joke generator is taking a break."
 
+FALLBACK_TRIVIA = [
+    {"question": "What is the capital of Australia?", "correct_answer": "Canberra", "incorrect_answers": ["Sydney", "Melbourne", "Brisbane"], "category": "Geography", "difficulty": "medium"},
+    {"question": "How many sides does a hexagon have?", "correct_answer": "6", "incorrect_answers": ["5", "7", "8"], "category": "Mathematics", "difficulty": "easy"},
+    {"question": "What planet is known as the Red Planet?", "correct_answer": "Mars", "incorrect_answers": ["Venus", "Jupiter", "Saturn"], "category": "Science", "difficulty": "easy"},
+    {"question": "Who wrote Romeo and Juliet?", "correct_answer": "William Shakespeare", "incorrect_answers": ["Charles Dickens", "Leo Tolstoy", "Mark Twain"], "category": "Literature", "difficulty": "easy"},
+    {"question": "What is the chemical symbol for gold?", "correct_answer": "Au", "incorrect_answers": ["Ag", "Fe", "Pb"], "category": "Science", "difficulty": "easy"},
+    {"question": "In which year did the Berlin Wall fall?", "correct_answer": "1989", "incorrect_answers": ["1991", "1985", "1993"], "category": "History", "difficulty": "medium"},
+    {"question": "What is the longest river in the world?", "correct_answer": "Nile", "incorrect_answers": ["Amazon", "Yangtze", "Mississippi"], "category": "Geography", "difficulty": "medium"},
+    {"question": "How many bones are in the adult human body?", "correct_answer": "206", "incorrect_answers": ["198", "215", "224"], "category": "Science", "difficulty": "medium"},
+    {"question": "What is the smallest country in the world?", "correct_answer": "Vatican City", "incorrect_answers": ["Monaco", "San Marino", "Liechtenstein"], "category": "Geography", "difficulty": "medium"},
+    {"question": "What programming language was created by Guido van Rossum?", "correct_answer": "Python", "incorrect_answers": ["Ruby", "Perl", "Java"], "category": "Technology", "difficulty": "easy"},
+    {"question": "How many planets are in our solar system?", "correct_answer": "8", "incorrect_answers": ["7", "9", "10"], "category": "Science", "difficulty": "easy"},
+    {"question": "What is the fastest land animal?", "correct_answer": "Cheetah", "incorrect_answers": ["Lion", "Greyhound", "Pronghorn"], "category": "Animals", "difficulty": "easy"},
+    {"question": "What year did World War II end?", "correct_answer": "1945", "incorrect_answers": ["1943", "1944", "1946"], "category": "History", "difficulty": "easy"},
+    {"question": "What is the square root of 144?", "correct_answer": "12", "incorrect_answers": ["11", "13", "14"], "category": "Mathematics", "difficulty": "easy"},
+    {"question": "Which ocean is the largest?", "correct_answer": "Pacific", "incorrect_answers": ["Atlantic", "Indian", "Arctic"], "category": "Geography", "difficulty": "easy"},
+    {"question": "Who painted the Mona Lisa?", "correct_answer": "Leonardo da Vinci", "incorrect_answers": ["Michelangelo", "Raphael", "Botticelli"], "category": "Art", "difficulty": "easy"},
+    {"question": "What is the hardest natural substance on Earth?", "correct_answer": "Diamond", "incorrect_answers": ["Quartz", "Corundum", "Topaz"], "category": "Science", "difficulty": "easy"},
+    {"question": "What does HTTP stand for?", "correct_answer": "HyperText Transfer Protocol", "incorrect_answers": ["High Transfer Text Protocol", "HyperText Transmission Protocol", "Hyper Transfer Text Procedure"], "category": "Technology", "difficulty": "medium"},
+    {"question": "What element has atomic number 1?", "correct_answer": "Hydrogen", "incorrect_answers": ["Helium", "Lithium", "Carbon"], "category": "Science", "difficulty": "easy"},
+    {"question": "In what country was cricket invented?", "correct_answer": "England", "incorrect_answers": ["India", "Australia", "Pakistan"], "category": "Sports", "difficulty": "medium"},
+]
+
+ACTIVITY_SUGGESTIONS = [
+    "Go for a 20-minute walk outside 🚶", "Learn 3 new facts about a country you've never visited 🌍",
+    "Write down 5 things you're grateful for today 📝", "Try cooking a recipe you've never made before 🍳",
+    "Call or message a friend you haven't spoken to in a while 📞", "Do a 10-minute meditation 🧘",
+    "Sketch something without worrying about the result 🎨", "Read a chapter of a book 📖",
+    "Organize one drawer or shelf 🗂️", "Watch a documentary on a topic you know nothing about 🎬",
+    "Learn 10 words in a new language 🗣️", "Do 20 push-ups, squats, or jumping jacks 💪",
+    "Write a short poem about your day ✍️", "Try a new music genre and make a playlist 🎵",
+    "Play a puzzle or brain teaser 🧩", "Bake something sweet and share it 🍪",
+    "Plan your ideal dream trip ✈️", "Do a random act of kindness 💙",
+    "Stargaze or watch the sunset 🌅", "Try a new sport for 30 minutes 🏸",
+]
+
 async def get_trivia_question():
     try:
         url = "https://opentdb.com/api.php?amount=1&type=multiple"
         async with aiohttp.ClientSession() as session:
-            async with session.get(url, timeout=aiohttp.ClientTimeout(total=5)) as resp:
-                data = await resp.json()
-                if data["response_code"] == 0:
-                    q = data["results"][0]
-                    return {
-                        "question": q["question"],
-                        "correct_answer": q["correct_answer"],
-                        "all_answers": q["incorrect_answers"] + [q["correct_answer"]],
-                        "category": q["category"],
-                        "difficulty": q["difficulty"]
-                    }
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=6)) as resp:
+                if resp.status != 429:
+                    data = await resp.json(content_type=None)
+                    if data["response_code"] == 0:
+                        q = data["results"][0]
+                        return {
+                            "question": q["question"],
+                            "correct_answer": q["correct_answer"],
+                            "all_answers": q["incorrect_answers"] + [q["correct_answer"]],
+                            "category": q["category"],
+                            "difficulty": q["difficulty"]
+                        }
     except Exception:
         pass
-    return None
+    # Fallback to local question bank
+    q = random.choice(FALLBACK_TRIVIA)
+    return {
+        "question": q["question"],
+        "correct_answer": q["correct_answer"],
+        "all_answers": q["incorrect_answers"] + [q["correct_answer"]],
+        "category": q["category"],
+        "difficulty": q["difficulty"]
+    }
 
 async def get_cat_fact():
     try:
@@ -267,37 +345,32 @@ async def get_meme():
         return None
 
 async def get_activity_suggestion():
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get("https://www.boredapi.com/api/activity", timeout=aiohttp.ClientTimeout(total=5)) as resp:
-                data = await resp.json()
-                return data.get("activity", "Try something new today!")
-    except Exception:
-        return "Try something new today!"
+    return random.choice(ACTIVITY_SUGGESTIONS)
 
 # ========== AI REPLY =================
 
 def generate_reply(user_message: str, system_prompt: str) -> str:
-    completion = groq_client.chat.completions.create(
-        model="openai/gpt-oss-120b",
-        messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_message}
-        ],
-        temperature=1,
-        max_completion_tokens=8000,
-        top_p=1,
-        reasoning_effort="medium",
-        stream=True,
-        stop=None
-    )
-    reply = ""
-    for chunk in completion:
-        reply += chunk.choices[0].delta.content or ""
-    reply = clean_output(reply)
-    if not reply:
-        return "🤔 I'm not sure how to answer that."
-    return reply
+    # Truncate user message to 300 chars to stay within free-tier TPM limits
+    user_message = user_message[:300]
+    try:
+        completion = groq_client.chat.completions.create(
+            model="llama-3.1-8b-instant",   # fast, low-token free-tier model
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user",   "content": user_message}
+            ],
+            temperature=0.8,
+            max_tokens=200,   # keep replies short; Discord messages don't need novels
+            stream=False,
+        )
+        reply = completion.choices[0].message.content or ""
+        reply = clean_output(reply)
+        return reply if reply else "🤔 I'm not sure how to answer that."
+    except Exception as e:
+        err = str(e)
+        if "413" in err or "rate_limit" in err.lower():
+            return "⏳ I'm a bit overloaded right now — try again in a moment!"
+        raise
 
 # ========== TOP.GG VOTE NUDGE ===================
 
@@ -350,16 +423,10 @@ def create_bot():
 
     @bot.event
     async def on_ready():
-        # ---------------------------------------------------------------
-        # SLASH COMMAND SYNC STRATEGY
-        # ---------------------------------------------------------------
-        # During development set DEV_GUILD_ID in your .env to your server's
-        # ID. Guild-scoped commands update INSTANTLY — no re-invite needed.
-        # For production (DEV_GUILD_ID not set) we sync globally; Discord
-        # can take up to 1 hour to propagate changes everywhere, but you
-        # still NEVER need to re-invite the bot for new commands.
-        # ---------------------------------------------------------------
-        # Wipe stale guild-specific commands from every server, then global sync
+        global user_points, user_stats, user_personas, daily_claimed, voted_users, bot_message_count
+        # Load data from JSONBin
+        user_points, user_stats, user_personas, daily_claimed, voted_users, bot_message_count = await load_data_async()
+
         for g in bot.guilds:
             bot.tree.clear_commands(guild=g)
             await bot.tree.sync(guild=g)
@@ -367,9 +434,10 @@ def create_bot():
         print("✅ Slash commands synced globally")
 
         check_reminders.start()
+        auto_save.start()
         print(f"✅ Bot online as {bot.user}")
         print(f"📊 Serving {len(bot.guilds)} servers")
-        print(f"💾 Loaded {len(user_points)} user point records from disk")
+        print(f"☁️  JSONBin storage active ({len(user_points)} point records loaded)")
 
     @bot.event
     async def on_message(message):
@@ -418,11 +486,34 @@ def create_bot():
                 random.choice(VOTE_MESSAGES),
                 embed=vote_embed
             )
-            save_data()
+            mark_dirty()
 
     # ========== SLASH COMMANDS =================
 
+    @bot.tree.error
+    async def on_app_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
+        if isinstance(error, app_commands.CommandOnCooldown):
+            try:
+                await interaction.response.send_message(
+                    f"⏳ Slow down! Try again in **{error.retry_after:.1f}s**.", ephemeral=True)
+            except Exception:
+                pass
+            return
+        inner = getattr(error, "original", error)
+        if isinstance(inner, discord.HTTPException) and inner.status == 429:
+            print("⚠️  Discord 429 — Cloudflare rate-limiting this IP")
+            return
+        traceback.print_exc()
+        try:
+            if not interaction.response.is_done():
+                await interaction.response.send_message("⚠️ Something went wrong. Please try again!", ephemeral=True)
+            else:
+                await interaction.followup.send("⚠️ Something went wrong. Please try again!", ephemeral=True)
+        except Exception:
+            pass
+
     @bot.tree.command(name="joke", description="Get a random joke 😂")
+    @app_commands.checks.cooldown(1, 5, key=lambda i: i.user.id)
     async def joke(interaction: discord.Interaction):
         await interaction.response.defer()
         joke_text = await get_joke_async()
@@ -535,6 +626,7 @@ def create_bot():
                     pass
 
     @bot.tree.command(name="trivia", description="Start a trivia question! 🧠")
+    @app_commands.checks.cooldown(1, 10, key=lambda i: i.guild_id)
     async def trivia(interaction: discord.Interaction):
         await interaction.response.defer()
         if interaction.guild and interaction.guild.id in active_trivia:
@@ -552,7 +644,7 @@ def create_bot():
         if not interaction.guild:
             await interaction.followup.send("This command can only be used in a server.")
             return
-        active_trivia[interaction.guild.id] = {"answer": correct, "category": question_data["category"]}
+        active_trivia[guild.id] = {"answer": correct, "category": question_data["category"]}
 
         diff_colors = {"easy": discord.Color.green(), "medium": discord.Color.orange(), "hard": discord.Color.red()}
         color = diff_colors.get(question_data["difficulty"], discord.Color.blue())
@@ -567,10 +659,23 @@ def create_bot():
         embed.add_field(name="⏳ Time Limit",  value="5 minutes",                             inline=True)
         embed.set_footer(text="Press a button to answer! Wrong answers lock you out.")
 
-        view = TriviaView(interaction.guild.id, correct, answers, question_data)
+        view = TriviaView(guild.id, correct, answers, question_data)
         msg  = await interaction.followup.send(embed=embed, view=view)
         view.message = msg
         track_user_activity(interaction.user.id)
+
+    @bot.tree.command(name="resettrivia", description="Force-reset a stuck trivia question 🔄 (Mod only)")
+    @app_commands.checks.has_permissions(manage_messages=True)
+    async def resettrivia(interaction: discord.Interaction):
+        guild = interaction.guild
+        if not guild:
+            await interaction.response.send_message("Server only.", ephemeral=True)
+            return
+        if guild.id in active_trivia:
+            active_trivia.pop(guild.id)
+            await interaction.response.send_message("✅ Trivia reset! Start a new one.", ephemeral=True)
+        else:
+            await interaction.response.send_message("ℹ️ No active trivia to reset.", ephemeral=True)
 
     @bot.tree.command(name="points", description="Check your points or someone else's 🏆")
     @app_commands.describe(user="User to check points for (optional)")
@@ -642,8 +747,8 @@ def create_bot():
             return
         bonus = random.randint(15, 50)
         daily_claimed[uid] = now_str
-        add_points(uid, bonus)  # also calls save_data()
-        save_data()
+        add_points(uid, bonus)
+        mark_dirty()
         embed = discord.Embed(
             title="🌅 Daily Bonus!",
             description=f"You claimed **{bonus}** bonus points!\nTotal: **{get_points(uid)}** points",
@@ -856,6 +961,7 @@ def create_bot():
         track_user_activity(interaction.user.id)
 
     @bot.tree.command(name="catfact", description="Get a random cat fact 🐱")
+    @app_commands.checks.cooldown(1, 8, key=lambda i: i.user.id)
     async def catfact(interaction: discord.Interaction):
         await interaction.response.defer()
         fact = await get_cat_fact()
@@ -864,6 +970,7 @@ def create_bot():
         track_user_activity(interaction.user.id)
 
     @bot.tree.command(name="dog", description="Get a random dog picture 🐕")
+    @app_commands.checks.cooldown(1, 8, key=lambda i: i.user.id)
     async def dog(interaction: discord.Interaction):
         await interaction.response.defer()
         image_url = await get_dog_image()
@@ -955,6 +1062,9 @@ def create_bot():
         if minutes < 1 or minutes > 1440:
             await interaction.response.send_message("❌ Please set a reminder between 1 and 1440 minutes!")
             return
+        if not isinstance(interaction.channel, (discord.TextChannel, discord.Thread, discord.DMChannel, discord.VoiceChannel)):
+            await interaction.response.send_message("❌ Can't set reminders in this channel type!", ephemeral=True)
+            return
         remind_time = datetime.now() + timedelta(minutes=minutes)
         reminders.append({
             "user_id": interaction.user.id,
@@ -995,7 +1105,7 @@ def create_bot():
     ])
     async def persona(interaction: discord.Interaction, style: str):
         user_personas[interaction.user.id] = style
-        save_data()
+        mark_dirty()
         descriptions = {
             "default": "Back to normal — helpful and friendly! 😊",
             "sarcastic": "Oh great, you picked sarcastic. Wonderful choice. 🙄",
@@ -1165,7 +1275,7 @@ def create_bot():
         bonus = 50
         voted_users[uid] = now.isoformat()
         add_points(uid, bonus)
-        save_data()
+        mark_dirty()
 
         reward_desc = (
             "Thank you for voting for Rune on Top.gg! 💙\n\n"
@@ -1208,7 +1318,7 @@ def create_bot():
             ("🐾 **Animals**", "`/catfact`, `/dog`"),
             ("💡 **Inspiration**", "`/advice`, `/quote`, `/activity`"),
             ("🎭 **AI Persona**", "`/persona` — Change how Rune talks to you (your choice is private!)"),
-            ("🛡️ **Moderation**", "`/kick`, `/ban`, `/mute`, `/unmute` *(requires permissions)*"),
+            ("🛡️ **Moderation**", "`/kick`, `/ban`, `/mute`, `/unmute`, `/resettrivia` *(requires permissions)*"),
             ("⏰ **Utility**", "`/remind`, `/stats`, `/serverinfo`, `/help`"),
             ("🗳️ **Vote**", "`/vote` — Vote for Rune on Top.gg | `/checkvote` — Claim your **+50 point** vote reward!"),
             ("💬 **AI Chat**", f"Use `{PREFIX}` prefix to chat with AI (e.g., `{PREFIX}hello`)"),
@@ -1228,12 +1338,19 @@ def create_bot():
                 try:
                     channel = bot.get_channel(reminder["channel_id"])
                     user = await bot.fetch_user(reminder["user_id"])
-                    if channel and isinstance(channel, discord.TextChannel):
+                    if isinstance(channel, (discord.TextChannel, discord.Thread, discord.DMChannel, discord.VoiceChannel)):
                         await channel.send(f"⏰ {user.mention} Reminder: **{reminder['message']}**")
                     reminders.remove(reminder)
                 except Exception as e:
                     print(f"Error sending reminder: {e}")
                     reminders.remove(reminder)
+
+    @tasks.loop(seconds=60)
+    async def auto_save():
+        if _dirty:
+            ok = await save_data_async()
+            if ok:
+                print("☁️  Auto-saved to JSONBin.")
 
     return bot
 
@@ -1243,7 +1360,8 @@ def run_forever():
     while True:
         try:
             bot = create_bot()
-            bot.run(DISCORD_TOKEN or "")
+            assert DISCORD_TOKEN is not None, "DISCORD_TOKEN not set!"
+            bot.run(DISCORD_TOKEN)
         except Exception:
             print("🔴 BOT CRASHED:")
             traceback.print_exc()
