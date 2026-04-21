@@ -6,7 +6,7 @@ import asyncio
 import time
 import traceback
 import random
-import json
+from aiohttp import web
 import os
 from datetime import datetime, timedelta
 import aiohttp
@@ -412,6 +412,23 @@ async def check_topgg_vote(user_id: int) -> bool:
         print(f"Top.gg API error: {e}")
     return False
 
+HEALTH_PORT = int(os.getenv("PORT", os.getenv("HEALTH_PORT", "8080")))
+
+async def start_health_server(bot):
+    """Lightweight HTTP endpoint for uptime monitoring."""
+    async def health(request):
+        if bot.is_ready() and not bot.is_closed():
+            return web.Response(text="OK", status=200)
+        return web.Response(text="Not Ready", status=503)
+
+    app = web.Application()
+    app.router.add_get("/health", health)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", HEALTH_PORT)
+    await site.start()
+    print(f"🏥 Health endpoint live on port {HEALTH_PORT}")
+
 # ========== BOT FACTORY ===================
 
 def create_bot():
@@ -432,6 +449,8 @@ def create_bot():
             await bot.tree.sync(guild=g)
         await bot.tree.sync()
         print("✅ Slash commands synced globally")
+
+        asyncio.create_task(start_health_server(bot))
 
         check_reminders.start()
         auto_save.start()
