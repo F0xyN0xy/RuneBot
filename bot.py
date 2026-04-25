@@ -6,7 +6,7 @@ import asyncio
 import time
 import traceback
 import random
-from aiohttp import web
+import json
 import os
 from datetime import datetime, timedelta
 import aiohttp
@@ -412,23 +412,6 @@ async def check_topgg_vote(user_id: int) -> bool:
         print(f"Top.gg API error: {e}")
     return False
 
-HEALTH_PORT = int(os.getenv("PORT", os.getenv("HEALTH_PORT", "8080")))
-
-async def start_health_server(bot):
-    """Lightweight HTTP endpoint for uptime monitoring."""
-    async def health(request):
-        if bot.is_ready() and not bot.is_closed():
-            return web.Response(text="OK", status=200)
-        return web.Response(text="Not Ready", status=503)
-
-    app = web.Application()
-    app.router.add_get("/health", health)
-    runner = web.AppRunner(app)
-    await runner.setup()
-    site = web.TCPSite(runner, "0.0.0.0", HEALTH_PORT)
-    await site.start()
-    print(f"🏥 Health endpoint live on port {HEALTH_PORT}")
-
 # ========== BOT FACTORY ===================
 
 def create_bot():
@@ -450,10 +433,9 @@ def create_bot():
         await bot.tree.sync()
         print("✅ Slash commands synced globally")
 
-        asyncio.create_task(start_health_server(bot))
-
         check_reminders.start()
         auto_save.start()
+        vc_watchdog.start()
         print(f"✅ Bot online as {bot.user}")
         print(f"📊 Serving {len(bot.guilds)} servers")
         print(f"☁️  JSONBin storage active ({len(user_points)} point records loaded)")
@@ -648,21 +630,26 @@ def create_bot():
     @app_commands.checks.cooldown(1, 10, key=lambda i: i.guild_id)
     async def trivia(interaction: discord.Interaction):
         await interaction.response.defer()
-        if interaction.guild and interaction.guild.id in active_trivia:
-            await interaction.followup.send("❌ A trivia question is already active! Finish it first.")
+        guild = interaction.guild
+        if not guild:
+            await interaction.followup.send("This command can only be used in a server.", ephemeral=True)
             return
+        if guild.id in active_trivia:
+            try:
+                await interaction.followup.send("❌ A trivia question is already active! Finish it first.")
+            except discord.HTTPException:
+                pass
+            return
+
         question_data = await get_trivia_question()
         if not question_data:
             await interaction.followup.send("⚠️ Couldn't fetch a trivia question. Try again!")
             return
 
-        correct  = question_data["correct_answer"]
-        answers  = question_data["all_answers"][:]
+        correct = question_data["correct_answer"]
+        answers = question_data["all_answers"][:]
         random.shuffle(answers)
 
-        if not interaction.guild:
-            await interaction.followup.send("This command can only be used in a server.")
-            return
         active_trivia[guild.id] = {"answer": correct, "category": question_data["category"]}
 
         diff_colors = {"easy": discord.Color.green(), "medium": discord.Color.orange(), "hard": discord.Color.red()}
@@ -673,14 +660,19 @@ def create_bot():
             description=f"**{question_data['question']}**",
             color=color
         )
-        embed.add_field(name="📚 Category",    value=question_data["category"],               inline=True)
-        embed.add_field(name="⚡ Difficulty",  value=question_data["difficulty"].capitalize(), inline=True)
-        embed.add_field(name="⏳ Time Limit",  value="5 minutes",                             inline=True)
+        embed.add_field(name="📚 Category",   value=question_data["category"],                inline=True)
+        embed.add_field(name="⚡ Difficulty", value=question_data["difficulty"].capitalize(),  inline=True)
+        embed.add_field(name="⏳ Time Limit", value="5 minutes",                              inline=True)
         embed.set_footer(text="Press a button to answer! Wrong answers lock you out.")
 
         view = TriviaView(guild.id, correct, answers, question_data)
-        msg  = await interaction.followup.send(embed=embed, view=view)
-        view.message = msg
+        try:
+            msg = await interaction.followup.send(embed=embed, view=view)
+            view.message = msg
+        except discord.HTTPException as e:
+            active_trivia.pop(guild.id, None)
+            print(f"⚠️  Could not send trivia message: {e}")
+            return
         track_user_activity(interaction.user.id)
 
     @bot.tree.command(name="resettrivia", description="Force-reset a stuck trivia question 🔄 (Mod only)")
@@ -1321,6 +1313,170 @@ def create_bot():
         )
         track_user_activity(interaction.user.id)
 
+    # ========== 24/7 VOICE CHAT =================
+    # Tracks which channel the bot is holding per guild
+    # {guild_id: {"channel_id": int, "joined_at": datetime, "vc": VoiceClient}}
+    vc_sessions: dict[int, dict] = {}
+
+    @bot.tree.command(name="247", description="Make Rune join a voice channel 24/7 🔊 (Mod only)")
+    @app_commands.describe(channel="The voice channel to join (defaults to your current channel)")
+    @app_commands.checks.has_permissions(manage_channels=True)
+    async def vc_247(interaction: discord.Interaction, channel: Optional[discord.VoiceChannel] = None):
+        guild = interaction.guild
+        if not guild:
+            await interaction.response.send_message("Server only.", ephemeral=True)
+            return
+
+        # Determine target channel
+        target = channel
+        if target is None:
+            # Try to use the invoker's current VC
+            if isinstance(interaction.user, discord.Member) and interaction.user.voice and interaction.user.voice.channel:
+                vc_channel = interaction.user.voice.channel
+                if isinstance(vc_channel, discord.VoiceChannel):
+                    target = vc_channel
+        if target is None:
+            await interaction.response.send_message(
+                "❌ Please join a voice channel first, or specify one with the `channel` option.",
+                ephemeral=True
+            )
+            return
+
+        # If already in a VC in this guild, move instead of rejoin
+        existing = vc_sessions.get(guild.id)
+        if existing:
+            vc: discord.VoiceClient = existing["vc"]
+            if vc.is_connected():
+                await vc.move_to(target)
+                existing["channel_id"] = target.id
+                existing["joined_at"]  = datetime.now()
+                embed = discord.Embed(
+                    title="🔊 Moved to new channel",
+                    description=f"Now holding **{target.name}** 24/7.",
+                    color=discord.Color.green()
+                )
+                embed.set_footer(text="Use /leave247 to disconnect.")
+                await interaction.response.send_message(embed=embed)
+                return
+
+        # Join fresh
+        try:
+            vc = await target.connect(reconnect=True, self_deaf=True)
+        except discord.ClientException:
+            await interaction.response.send_message("❌ Already connected somewhere — use `/leave247` first.", ephemeral=True)
+            return
+        except discord.Forbidden:
+            await interaction.response.send_message("❌ I don't have permission to join that channel.", ephemeral=True)
+            return
+
+        vc_sessions[guild.id] = {
+            "channel_id": target.id,
+            "joined_at":  datetime.now(),
+            "vc":         vc,
+        }
+
+        embed = discord.Embed(
+            title="🔊 24/7 Voice Active",
+            description=f"Now holding **{target.name}** open 24/7!\nI'll stay even if everyone leaves.",
+            color=discord.Color.green()
+        )
+        embed.add_field(name="Channel", value=target.mention, inline=True)
+        embed.add_field(name="Started", value=f"<t:{int(datetime.now().timestamp())}:R>", inline=True)
+        embed.set_footer(text="Use /leave247 to disconnect | /vcstatus to check uptime")
+        await interaction.response.send_message(embed=embed)
+
+    @bot.tree.command(name="leave247", description="Make Rune leave the 24/7 voice channel 🔇 (Mod only)")
+    @app_commands.checks.has_permissions(manage_channels=True)
+    async def leave_247(interaction: discord.Interaction):
+        guild = interaction.guild
+        if not guild:
+            await interaction.response.send_message("Server only.", ephemeral=True)
+            return
+
+        session = vc_sessions.pop(guild.id, None)
+        if session is None:
+            await interaction.response.send_message("ℹ️ I'm not in a 24/7 voice session right now.", ephemeral=True)
+            return
+
+        vc = session["vc"]
+        channel_id = session["channel_id"]
+        joined_at  = session["joined_at"]
+
+        if vc.is_connected():
+            await vc.disconnect(force=True)
+
+        duration = datetime.now() - joined_at
+        hours, remainder = divmod(int(duration.total_seconds()), 3600)
+        minutes = remainder // 60
+
+        channel = guild.get_channel(channel_id)
+        ch_name = channel.name if isinstance(channel, discord.VoiceChannel) else f"<#{channel_id}>"
+
+        embed = discord.Embed(
+            title="🔇 Left voice channel",
+            description=f"Disconnected from **{ch_name}**.",
+            color=discord.Color.orange()
+        )
+        embed.add_field(name="⏱️ Total uptime", value=f"{hours}h {minutes}m", inline=True)
+        await interaction.response.send_message(embed=embed)
+
+    @bot.tree.command(name="vcstatus", description="Check Rune's 24/7 voice session status 📊")
+    async def vc_status(interaction: discord.Interaction):
+        guild = interaction.guild
+        if not guild:
+            await interaction.response.send_message("Server only.", ephemeral=True)
+            return
+
+        session = vc_sessions.get(guild.id)
+        if not session:
+            await interaction.response.send_message("ℹ️ No active 24/7 voice session in this server.", ephemeral=True)
+            return
+
+        joined_at  = session["joined_at"]
+        channel_id = session["channel_id"]
+        vc: discord.VoiceClient = session["vc"]
+
+        duration = datetime.now() - joined_at
+        hours, remainder = divmod(int(duration.total_seconds()), 3600)
+        minutes = remainder // 60
+
+        channel = guild.get_channel(channel_id)
+        ch_name = channel.name if isinstance(channel, discord.VoiceChannel) else f"#{channel_id}"
+        members_in_vc = len([m for m in (channel.members if isinstance(channel, discord.VoiceChannel) else []) if not m.bot])
+
+        embed = discord.Embed(
+            title="📊 24/7 Voice Status",
+            color=discord.Color.green() if vc.is_connected() else discord.Color.red()
+        )
+        embed.add_field(name="🔊 Channel",      value=f"<#{channel_id}>",       inline=True)
+        embed.add_field(name="⏱️ Uptime",       value=f"{hours}h {minutes}m",   inline=True)
+        embed.add_field(name="👥 Users in VC",  value=str(members_in_vc),       inline=True)
+        embed.add_field(name="📡 Connected",    value="✅ Yes" if vc.is_connected() else "❌ No", inline=True)
+        embed.add_field(name="🕐 Joined at",    value=f"<t:{int(joined_at.timestamp())}:F>", inline=False)
+        embed.set_footer(text="Use /leave247 to disconnect")
+        await interaction.response.send_message(embed=embed)
+
+    # Auto-reconnect task: if the bot gets disconnected from a 24/7 VC, rejoin
+    @tasks.loop(seconds=30)
+    async def vc_watchdog():
+        for guild_id, session in list(vc_sessions.items()):
+            vc: discord.VoiceClient = session["vc"]
+            if not vc.is_connected():
+                guild = bot.get_guild(guild_id)
+                if guild is None:
+                    vc_sessions.pop(guild_id, None)
+                    continue
+                channel = guild.get_channel(session["channel_id"])
+                if not isinstance(channel, discord.VoiceChannel):
+                    vc_sessions.pop(guild_id, None)
+                    continue
+                try:
+                    new_vc = await channel.connect(reconnect=True, self_deaf=True)
+                    session["vc"] = new_vc
+                    print(f"🔊 Auto-reconnected to {channel.name} in {guild.name}")
+                except Exception as e:
+                    print(f"⚠️  VC watchdog reconnect failed for {guild_id}: {e}")
+
     # ========== HELP COMMAND =================
 
     @bot.tree.command(name="help", description="View all available commands 📖")
@@ -1339,6 +1495,7 @@ def create_bot():
             ("🎭 **AI Persona**", "`/persona` — Change how Rune talks to you (your choice is private!)"),
             ("🛡️ **Moderation**", "`/kick`, `/ban`, `/mute`, `/unmute`, `/resettrivia` *(requires permissions)*"),
             ("⏰ **Utility**", "`/remind`, `/stats`, `/serverinfo`, `/help`"),
+            ("🔊 **Voice 24/7**", "`/247` — Join a VC 24/7 | `/leave247` — Disconnect | `/vcstatus` — Uptime & status *(Mod only for join/leave)*"),
             ("🗳️ **Vote**", "`/vote` — Vote for Rune on Top.gg | `/checkvote` — Claim your **+50 point** vote reward!"),
             ("💬 **AI Chat**", f"Use `{PREFIX}` prefix to chat with AI (e.g., `{PREFIX}hello`)"),
         ]
