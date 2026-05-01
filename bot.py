@@ -545,15 +545,13 @@ def create_bot():
     # ========== TRIVIA VIEW (buttons, lockout, 5-min timer) =================
 
     class TriviaView(discord.ui.View):
-        message: discord.Message
-
         def __init__(self, guild_id: int, correct: str, answers: list[str], question_data: dict):
             super().__init__(timeout=300)  # 5 minutes
             self.guild_id   = guild_id
             self.correct    = correct
-            self.answered   = False          # True once someone is correct
-            self.wrong_ids: set[int] = set() # users who already guessed wrong
-            self.message    = None           # set after send so we can edit on timeout
+            self.answered   = False
+            self.wrong_ids: set[int] = set()
+            self.message: discord.Message | None = None  # set after send
 
             letters = ["A", "B", "C", "D"]
             for i, ans in enumerate(answers):
@@ -673,7 +671,7 @@ def create_bot():
         view = TriviaView(guild.id, correct, answers, question_data)
         try:
             msg = await interaction.followup.send(embed=embed, view=view)
-            view.message = msg
+            view.message = msg  # type: ignore[assignment]
         except discord.HTTPException as e:
             active_trivia.pop(guild.id, None)
             print(f"⚠️  Could not send trivia message: {e}")
@@ -1320,18 +1318,17 @@ def create_bot():
 
 
     # ========== PUSH-TO-TALK / TTS STATE ==========
-    # {guild_id: {"recording": bool, "user_id": int, "sink": RuneSink|None,
-    #              "text_channel_id": int}}
+    # Records raw PCM via a background asyncio task, wraps it in WAV,
+    # sends to Groq Whisper for STT, then Zonos for TTS reply.
+    # No dependency on discord.sinks — works with any discord.py fork.
+    # {guild_id: {"recording": bool, "user_id": int, "text_channel_id": int,
+    #              "frames": list[bytes], "stop_event": asyncio.Event}}
     ptt_sessions: dict[int, dict] = {}
 
-    class RuneSink(discord.sinks.WaveSink):
-        """Custom sink — captures audio and calls back when done."""
-        def __init__(self, finished_callback):
-            super().__init__()
-            self.finished_callback = finished_callback
+    # ── TTS helpers ─────────────────────────────────────────────────────────
 
     async def transcribe_audio(audio_bytes: bytes) -> str:
-        """Send WAV audio to Groq Whisper and return transcribed text."""
+        """Send WAV bytes to Groq Whisper and return transcribed text."""
         try:
             with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
                 tmp.write(audio_bytes)
@@ -1350,13 +1347,13 @@ def create_bot():
             return ""
 
     async def zonos_tts(text: str) -> bytes | None:
-        """Convert text to speech using Zyphra Zonos API. Returns MP3 bytes."""
+        """Convert text → speech via Zyphra Zonos API. Returns MP3 bytes or None."""
         if not ZONOS_API_KEY:
             return None
         try:
             payload = {
                 "model": "zonos-v0.1-hybrid",
-                "text": text[:500],  # cap length
+                "text": text[:500],
                 "speaking_rate": 15,
                 "language_iso_code": "en-us",
             }
@@ -1367,8 +1364,7 @@ def create_bot():
             async with aiohttp.ClientSession() as session:
                 async with session.post(
                     "https://api.zyphra.com/v1/audio/text-to-speech",
-                    json=payload,
-                    headers=headers,
+                    json=payload, headers=headers,
                     timeout=aiohttp.ClientTimeout(total=20),
                 ) as resp:
                     if resp.status == 200:
@@ -1379,15 +1375,14 @@ def create_bot():
             print(f"⚠️  Zonos TTS exception: {e}")
         return None
 
-    async def play_tts_response(vc: discord.VoiceClient, text: str, text_channel: discord.abc.Messageable | None = None):
-        """Generate TTS audio via Zonos and play it in the VC."""
+    async def play_tts_response(vc: discord.VoiceClient, text: str,
+                                 text_channel: discord.abc.Messageable | None = None):
+        """Generate TTS via Zonos and play in VC. Falls back to text if unavailable."""
         audio_bytes = await zonos_tts(text)
         if not audio_bytes:
-            # Zonos unavailable — just post the reply as text
             if text_channel:
-                await text_channel.send(f"🔊 *(TTS unavailable)* {text}")
+                await text_channel.send(f"🔊 *(TTS unavailable — no Zonos key)* {text}")
             return
-        # Write mp3 bytes to a temp file and play via FFmpeg
         with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as tmp:
             tmp.write(audio_bytes)
             tmp_path = tmp.name
@@ -1398,37 +1393,62 @@ def create_bot():
             vc.play(source, after=lambda e: os.unlink(tmp_path) if os.path.exists(tmp_path) else None)
         except Exception as e:
             print(f"⚠️  FFmpeg playback error: {e}")
-            os.unlink(tmp_path)
+            if os.path.exists(tmp_path):
+                os.unlink(tmp_path)
 
-    async def handle_ptt_finished(sink: discord.sinks.WaveSink, guild_id: int, user_id: int, text_channel_id: int):
-        """Called when recording stops — transcribes, generates reply, speaks it."""
-        guild = bot.get_guild(guild_id)
-        if not guild:
-            return
+    async def capture_and_process_ptt(guild_id: int, user_id: int,
+                                       text_channel_id: int, seconds: int,
+                                       vc: discord.VoiceClient):
+        """
+        Records raw PCM from the VC for `seconds` seconds by reading from
+        vc.recv_audio (available in discord.py 2.7.x with davey), wraps it
+        in a WAV container, transcribes via Whisper, replies via LLaMA + Zonos.
+        """
+        frames: list[bytes] = []
+        stop_event = asyncio.Event()
+        ptt_sessions[guild_id]["stop_event"] = stop_event
 
-        # Get the recorded audio for this specific user
-        audio_data = sink.audio_data.get(user_id)
-        if not audio_data:
-            return
-
-        raw_pcm = audio_data.file
-        raw_pcm.seek(0)
-        pcm_bytes = raw_pcm.read()
-
-        # Wrap raw PCM in a valid WAV container (48kHz, 16-bit, 2ch = discord default)
-        wav_buffer = io.BytesIO()
-        with wave.open(wav_buffer, "wb") as wf:
-            wf.setnchannels(2)
-            wf.setsampwidth(2)      # 16-bit
-            wf.setframerate(48000)  # Discord audio rate
-            wf.writeframes(pcm_bytes)
-        wav_bytes = wav_buffer.getvalue()
-
-        # Get text channel
         text_channel = bot.get_channel(text_channel_id)
         messageable = text_channel if isinstance(text_channel, discord.TextChannel) else None
 
-        # Transcribe
+        # ── Record ──────────────────────────────────────────────────────────
+        # discord.py 2.7.x (davey) exposes vc.recv_audio as an async generator
+        # that yields (user_id, PCMFrame) tuples. We filter to our target user.
+        FRAME_DURATION = 0.02          # 20 ms per Discord frame
+        MAX_FRAMES = int(seconds / FRAME_DURATION)
+        frame_count = 0
+
+        try:
+            async for packet in vc.recv_audio():   # type: ignore[attr-defined]
+                if stop_event.is_set() or frame_count >= MAX_FRAMES:
+                    break
+                uid, pcm_frame = packet
+                if uid == user_id:
+                    frames.append(bytes(pcm_frame))
+                frame_count += 1
+        except Exception as e:
+            print(f"⚠️  PTT capture error: {e}")
+
+        ptt_sessions[guild_id]["recording"] = False
+
+        if not frames:
+            if messageable:
+                await messageable.send("⚠️ No audio captured — make sure you're unmuted and speaking!")
+            return
+
+        # ── Wrap PCM → WAV ──────────────────────────────────────────────────
+        pcm_bytes = b"".join(frames)
+        wav_buffer = io.BytesIO()
+        with wave.open(wav_buffer, "wb") as wf:
+            wf.setnchannels(2)       # Discord sends stereo
+            wf.setsampwidth(2)       # 16-bit PCM
+            wf.setframerate(48000)   # Discord audio rate
+            wf.writeframes(pcm_bytes)
+        wav_bytes = wav_buffer.getvalue()
+
+        # ── STT ─────────────────────────────────────────────────────────────
+        if messageable:
+            await messageable.send("🔄 Processing your audio...")
         transcript = await transcribe_audio(wav_bytes)
         if not transcript:
             if messageable:
@@ -1438,14 +1458,16 @@ def create_bot():
         if messageable:
             await messageable.send(f"🎙️ **You said:** {transcript}")
 
-        # Get AI reply using the existing generate_reply function
-        persona = user_personas.get(user_id, "You are Rune, a friendly Discord bot. Keep replies short and conversational (1-3 sentences max).")
+        # ── LLaMA reply ─────────────────────────────────────────────────────
+        persona = user_personas.get(
+            user_id,
+            "You are Rune, a friendly Discord bot. Keep replies short and conversational (1-3 sentences max)."
+        )
         reply = await asyncio.to_thread(generate_reply, transcript, persona)
-
         if messageable:
             await messageable.send(f"🔊 **Rune:** {reply}")
 
-        # Play TTS in VC
+        # ── TTS playback ────────────────────────────────────────────────────
         vc_session = vc_sessions.get(guild_id)
         if vc_session and vc_session["vc"].is_connected():
             await play_tts_response(vc_session["vc"], reply, messageable)
@@ -1658,21 +1680,10 @@ def create_bot():
         user_id = interaction.user.id
         text_channel_id = ptt_sessions[guild.id]["text_channel_id"]
 
-        # Start recording
-        vc.start_recording(
-            discord.sinks.WaveSink(),
-            lambda sink, *_: asyncio.ensure_future(
-                handle_ptt_finished(sink, guild.id, user_id, text_channel_id)
-            ),
+        # Kick off background recording + processing task
+        asyncio.ensure_future(
+            capture_and_process_ptt(guild.id, user_id, text_channel_id, seconds, vc)
         )
-
-        # Stop after N seconds
-        await asyncio.sleep(seconds)
-
-        if vc.recording:
-            vc.stop_recording()
-
-        ptt_sessions[guild.id]["recording"] = False
 
     @bot.tree.command(name="stopttt", description="Stop an ongoing PTT recording early ⏹️")
     async def stop_ptt(interaction: discord.Interaction):
@@ -1693,10 +1704,11 @@ def create_bot():
             await interaction.response.send_message("ℹ️ No active recording to stop.", ephemeral=True)
             return
 
-        if vc.recording:
-            vc.stop_recording()
+        stop_event = session.get("stop_event")
+        if stop_event:
+            stop_event.set()
         ptt_sessions[guild.id]["recording"] = False
-        await interaction.response.send_message("⏹️ Recording stopped early — processing now...")
+        await interaction.response.send_message("⏹️ Recording stopped — processing now...")
 
     # ========== HELP COMMAND =================
 
