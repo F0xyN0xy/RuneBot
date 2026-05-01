@@ -8,6 +8,10 @@ import traceback
 import random
 import json
 import os
+import io
+import wave
+import struct
+import tempfile
 from datetime import datetime, timedelta
 import aiohttp
 from typing import Optional
@@ -25,6 +29,7 @@ RESTART_DELAY  = int(os.getenv("RESTART_DELAY", "30"))
 TOPGG_TOKEN    = os.getenv("TOPGG_TOKEN", "")
 TOPGG_BOT_ID   = os.getenv("TOPGG_BOT_ID", "")
 TOPGG_URL      = "https://top.gg/bot/{bot_id}/vote"
+ZONOS_API_KEY  = os.getenv("ZONOS_API_KEY", "")   # Zyphra Zonos TTS API key
 
 JSONBIN_URL = f"https://api.jsonbin.io/v3/b/{JSONBIN_BIN_ID}"
 JSONBIN_HEADERS: dict[str, str] = {
@@ -1313,6 +1318,138 @@ def create_bot():
         )
         track_user_activity(interaction.user.id)
 
+
+    # ========== PUSH-TO-TALK / TTS STATE ==========
+    # {guild_id: {"recording": bool, "user_id": int, "sink": RuneSink|None,
+    #              "text_channel_id": int}}
+    ptt_sessions: dict[int, dict] = {}
+
+    class RuneSink(discord.sinks.WaveSink):
+        """Custom sink — captures audio and calls back when done."""
+        def __init__(self, finished_callback):
+            super().__init__()
+            self.finished_callback = finished_callback
+
+    async def transcribe_audio(audio_bytes: bytes) -> str:
+        """Send WAV audio to Groq Whisper and return transcribed text."""
+        try:
+            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+                tmp.write(audio_bytes)
+                tmp_path = tmp.name
+            with open(tmp_path, "rb") as f:
+                result = groq_client.audio.transcriptions.create(
+                    model="whisper-large-v3",
+                    file=("audio.wav", f, "audio/wav"),
+                    response_format="text",
+                    language="en",
+                )
+            os.unlink(tmp_path)
+            return str(result).strip()
+        except Exception as e:
+            print(f"⚠️  Whisper STT error: {e}")
+            return ""
+
+    async def zonos_tts(text: str) -> bytes | None:
+        """Convert text to speech using Zyphra Zonos API. Returns MP3 bytes."""
+        if not ZONOS_API_KEY:
+            return None
+        try:
+            payload = {
+                "model": "zonos-v0.1-hybrid",
+                "text": text[:500],  # cap length
+                "speaking_rate": 15,
+                "language_iso_code": "en-us",
+            }
+            headers = {
+                "Authorization": f"Bearer {ZONOS_API_KEY}",
+                "Content-Type": "application/json",
+            }
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    "https://api.zyphra.com/v1/audio/text-to-speech",
+                    json=payload,
+                    headers=headers,
+                    timeout=aiohttp.ClientTimeout(total=20),
+                ) as resp:
+                    if resp.status == 200:
+                        return await resp.read()
+                    body = await resp.text()
+                    print(f"⚠️  Zonos TTS error {resp.status}: {body[:200]}")
+        except Exception as e:
+            print(f"⚠️  Zonos TTS exception: {e}")
+        return None
+
+    async def play_tts_response(vc: discord.VoiceClient, text: str, text_channel: discord.abc.Messageable | None = None):
+        """Generate TTS audio via Zonos and play it in the VC."""
+        audio_bytes = await zonos_tts(text)
+        if not audio_bytes:
+            # Zonos unavailable — just post the reply as text
+            if text_channel:
+                await text_channel.send(f"🔊 *(TTS unavailable)* {text}")
+            return
+        # Write mp3 bytes to a temp file and play via FFmpeg
+        with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as tmp:
+            tmp.write(audio_bytes)
+            tmp_path = tmp.name
+        try:
+            source = discord.FFmpegPCMAudio(tmp_path)
+            if vc.is_playing():
+                vc.stop()
+            vc.play(source, after=lambda e: os.unlink(tmp_path) if os.path.exists(tmp_path) else None)
+        except Exception as e:
+            print(f"⚠️  FFmpeg playback error: {e}")
+            os.unlink(tmp_path)
+
+    async def handle_ptt_finished(sink: discord.sinks.WaveSink, guild_id: int, user_id: int, text_channel_id: int):
+        """Called when recording stops — transcribes, generates reply, speaks it."""
+        guild = bot.get_guild(guild_id)
+        if not guild:
+            return
+
+        # Get the recorded audio for this specific user
+        audio_data = sink.audio_data.get(user_id)
+        if not audio_data:
+            return
+
+        raw_pcm = audio_data.file
+        raw_pcm.seek(0)
+        pcm_bytes = raw_pcm.read()
+
+        # Wrap raw PCM in a valid WAV container (48kHz, 16-bit, 2ch = discord default)
+        wav_buffer = io.BytesIO()
+        with wave.open(wav_buffer, "wb") as wf:
+            wf.setnchannels(2)
+            wf.setsampwidth(2)      # 16-bit
+            wf.setframerate(48000)  # Discord audio rate
+            wf.writeframes(pcm_bytes)
+        wav_bytes = wav_buffer.getvalue()
+
+        # Get text channel
+        text_channel = bot.get_channel(text_channel_id)
+        messageable = text_channel if isinstance(text_channel, discord.TextChannel) else None
+
+        # Transcribe
+        transcript = await transcribe_audio(wav_bytes)
+        if not transcript:
+            if messageable:
+                await messageable.send("⚠️ Couldn't understand that — try again with `/ptt`.")
+            return
+
+        if messageable:
+            await messageable.send(f"🎙️ **You said:** {transcript}")
+
+        # Get AI reply using the existing generate_reply function
+        persona = user_personas.get(user_id, "You are Rune, a friendly Discord bot. Keep replies short and conversational (1-3 sentences max).")
+        reply = await asyncio.to_thread(generate_reply, transcript, persona)
+
+        if messageable:
+            await messageable.send(f"🔊 **Rune:** {reply}")
+
+        # Play TTS in VC
+        vc_session = vc_sessions.get(guild_id)
+        if vc_session and vc_session["vc"].is_connected():
+            await play_tts_response(vc_session["vc"], reply, messageable)
+
     # ========== 24/7 VOICE CHAT =================
     # Tracks which channel the bot is holding per guild
     # {guild_id: {"channel_id": int, "joined_at": datetime, "vc": VoiceClient}}
@@ -1477,6 +1614,90 @@ def create_bot():
                 except Exception as e:
                     print(f"⚠️  VC watchdog reconnect failed for {guild_id}: {e}")
 
+
+    @bot.tree.command(name="ptt", description="Start push-to-talk — Rune listens to you for a few seconds 🎙️")
+    @app_commands.describe(seconds="How many seconds to record (3–15, default 5)")
+    async def ptt(interaction: discord.Interaction, seconds: int = 5):
+        guild = interaction.guild
+        if not guild:
+            await interaction.response.send_message("Server only.", ephemeral=True)
+            return
+
+        # Must be in a VC
+        if not isinstance(interaction.user, discord.Member) or not interaction.user.voice or not interaction.user.voice.channel:
+            await interaction.response.send_message("❌ You need to be in a voice channel to use PTT!", ephemeral=True)
+            return
+
+        # Bot must also be in a VC in this guild
+        vc_session = vc_sessions.get(guild.id)
+        if not vc_session or not vc_session["vc"].is_connected():
+            await interaction.response.send_message("❌ Rune isn't in a voice channel yet — use `/247` first!", ephemeral=True)
+            return
+
+        vc: discord.VoiceClient = vc_session["vc"]
+
+        # Clamp seconds
+        seconds = max(3, min(15, seconds))
+
+        # Already recording?
+        if ptt_sessions.get(guild.id, {}).get("recording"):
+            await interaction.response.send_message("⏺️ Already recording! Wait for the current PTT to finish.", ephemeral=True)
+            return
+
+        ptt_sessions[guild.id] = {
+            "recording": True,
+            "user_id": interaction.user.id,
+            "text_channel_id": interaction.channel.id if isinstance(interaction.channel, discord.TextChannel) else 0,
+        }
+
+        await interaction.response.send_message(
+            f"🎙️ **Recording for {seconds}s...** Speak now! *(Results will appear in this channel)*",
+            ephemeral=False
+        )
+
+        user_id = interaction.user.id
+        text_channel_id = ptt_sessions[guild.id]["text_channel_id"]
+
+        # Start recording
+        vc.start_recording(
+            discord.sinks.WaveSink(),
+            lambda sink, *_: asyncio.ensure_future(
+                handle_ptt_finished(sink, guild.id, user_id, text_channel_id)
+            ),
+        )
+
+        # Stop after N seconds
+        await asyncio.sleep(seconds)
+
+        if vc.recording:
+            vc.stop_recording()
+
+        ptt_sessions[guild.id]["recording"] = False
+
+    @bot.tree.command(name="stopttt", description="Stop an ongoing PTT recording early ⏹️")
+    async def stop_ptt(interaction: discord.Interaction):
+        guild = interaction.guild
+        if not guild:
+            await interaction.response.send_message("Server only.", ephemeral=True)
+            return
+
+        vc_session = vc_sessions.get(guild.id)
+        if not vc_session:
+            await interaction.response.send_message("ℹ️ Not in a voice channel.", ephemeral=True)
+            return
+
+        vc: discord.VoiceClient = vc_session["vc"]
+        session = ptt_sessions.get(guild.id, {})
+
+        if not session.get("recording"):
+            await interaction.response.send_message("ℹ️ No active recording to stop.", ephemeral=True)
+            return
+
+        if vc.recording:
+            vc.stop_recording()
+        ptt_sessions[guild.id]["recording"] = False
+        await interaction.response.send_message("⏹️ Recording stopped early — processing now...")
+
     # ========== HELP COMMAND =================
 
     @bot.tree.command(name="help", description="View all available commands 📖")
@@ -1496,6 +1717,7 @@ def create_bot():
             ("🛡️ **Moderation**", "`/kick`, `/ban`, `/mute`, `/unmute`, `/resettrivia` *(requires permissions)*"),
             ("⏰ **Utility**", "`/remind`, `/stats`, `/serverinfo`, `/help`"),
             ("🔊 **Voice 24/7**", "`/247` — Join a VC 24/7 | `/leave247` — Disconnect | `/vcstatus` — Uptime & status *(Mod only for join/leave)*"),
+            ("🎙️ **Push-to-Talk**", "`/ptt [seconds]` — Speak & Rune replies with TTS | `/stopttt` — Stop recording early"),
             ("🗳️ **Vote**", "`/vote` — Vote for Rune on Top.gg | `/checkvote` — Claim your **+50 point** vote reward!"),
             ("💬 **AI Chat**", f"Use `{PREFIX}` prefix to chat with AI (e.g., `{PREFIX}hello`)"),
         ]
