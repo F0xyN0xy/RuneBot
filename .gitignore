@@ -58,6 +58,7 @@ models/
 *.code-workspace
 .qodo
 data.json
+.claude
 
 # PyCharm
 .idea/
@@ -102,7 +103,7 @@ temp/
 tmp/
 
 # User data
-user_data.json
+bot_data.json
 points.json
 stats.json
 
