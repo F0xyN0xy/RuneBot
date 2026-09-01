@@ -466,14 +466,19 @@ async def generate_reply(user_message: str, system_prompt: str) -> str:
             return reply if reply else "🤔 I'm not sure how to answer that."
         except Exception as e:
             err = str(e)
-            # 503 = overloaded, 429 = rate limit, 500 = server error
-            if any(code in err for code in ["503", "429", "500", "502", "504"]):
+            # Broader detection: OmniRoute / OpenAI-style errors often contain
+            # "overloaded", "busy", "unavailable", or HTTP error codes.
+            busy_signals = ["503", "429", "500", "502", "504", "overloaded", "busy",
+                            "unavailable", "timeout", "rate_limit", "too many requests",
+                            "service unavailable", "temporarily unavailable", "down"]
+            is_busy = any(sig in err.lower() for sig in busy_signals)
+            if is_busy:
                 print(f"[OmniRoute fallback] {err[:120]}")
-            elif "413" in err or "rate_limit" in err.lower() or "too many requests" in err.lower():
+            elif "413" in err or "rate_limit" in err.lower():
                 print(f"[OmniRate limit] {err[:120]}")
             else:
                 print(f"[OmniRoute error] {err[:120]}")
-            # Fall through to Groq
+            # Always fall through to Groq on any OmniRoute exception.
 
     # ── Fallback: Groq direct ────────────────────────────────────────────
     if groq_client is not None:
@@ -1320,7 +1325,7 @@ def create_bot():
             "self_stream": after.self_stream or False,
             "self_video": after.self_video or False,
             "suppress": after.suppress,
-            "request_to_speak_timestamp": after.request_to_speak_timestamp.isoformat() if after.request_to_speak_timestamp else None,
+            "request_to_speak_timestamp": after.request_to_speak_timestamp.isoformat() if hasattr(after, "request_to_speak_timestamp") and after.request_to_speak_timestamp else None,
         }
         await gateway_logger.log("VOICE_STATE_UPDATE", data)
 
@@ -2457,10 +2462,20 @@ def create_bot():
                     vc_sessions.pop(guild_id, None)
                     continue
                 try:
+                    # Wait a moment for any in-flight disconnect to settle,
+                    # then attempt the reconnect with a fresh voice client.
+                    await asyncio.sleep(1)
                     new_vc = await channel.connect(reconnect=True, self_deaf=True)
                     session["vc"] = new_vc
                     print(f"Auto-reconnected to {channel.name} in {guild.name}")
                 except Exception as e:
+                    err = str(e)
+                    # "Cannot write to closing transport" means the gateway socket
+                    # was already closing — retry on the next loop tick instead
+                    # of spamming the same failure.
+                    if "closing transport" in err or "ConnectionReset" in err:
+                        print(f"VC watchdog: gateway socket closing for {guild_id}, will retry next tick")
+                        continue
                     print(f"VC watchdog reconnect failed for {guild_id}: {e}")
 
     @bot.tree.command(name="ptt", description="Start push-to-talk — Rune listens to you for a few seconds 🎙️")
