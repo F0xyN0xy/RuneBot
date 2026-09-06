@@ -12,6 +12,7 @@ import wave
 import tempfile
 from datetime import datetime, timedelta
 import aiohttp
+from aiohttp import web
 from typing import Optional
 from dotenv import load_dotenv
 
@@ -41,6 +42,8 @@ PREFIX         = os.getenv("PREFIX", ".")
 RESTART_DELAY  = int(os.getenv("RESTART_DELAY", "30"))
 TOPGG_TOKEN    = os.getenv("TOPGG_TOKEN", "")
 TOPGG_BOT_ID   = os.getenv("TOPGG_BOT_ID", "")
+TOPGG_WEBHOOK_AUTH = os.getenv("TOPGG_WEBHOOK_AUTH", "")
+WEBHOOK_PORT   = int(os.getenv("WEBHOOK_PORT", "8080"))
 ZONOS_API_KEY  = os.getenv("ZONOS_API_KEY", "")
 
 # NEW: Gateway logging channel ID (set in .env as GATEWAY_LOG_CHANNEL_ID)
@@ -539,6 +542,119 @@ async def check_topgg_vote(user_id: int) -> bool:
     except Exception as e:
         print(f"Top.gg API error: {e}")
     return False
+
+
+# ╔══════════════════════════════════════════════════════════════════════════════╗
+# ║           TOP.GG WEBHOOK — Auto-detect votes & DM thank-you                 ║
+# ╚══════════════════════════════════════════════════════════════════════════════╝
+
+VOTE_THANK_YOU_MESSAGES = [
+    "💙 Thank you so much for voting for **Rune** on Top.gg! You're amazing!",
+    "🎉 Woohoo! Thanks for voting! Your support means the world to me! 💙",
+    "⭐ You just made my day! Thanks for voting for Rune! Here's **+50 bonus points** as a thank-you!",
+    "🚀 Big thanks for the vote! You're helping Rune grow! 💙 Enjoy your **+50 points**!",
+    "✨ A wild voter appears! Thanks for supporting Rune! 💙 Have **+50 bonus points**!",
+]
+
+# Reference to the bot instance, set when the bot is created
+_bot_instance: Optional[commands.Bot] = None
+
+
+async def _handle_topgg_webhook(request: web.Request) -> web.Response:
+    """Handle incoming Top.gg vote webhooks."""
+    global _bot_instance
+
+    # Validate authorization header
+    auth_header = request.headers.get("Authorization", "")
+    if TOPGG_WEBHOOK_AUTH and auth_header != TOPGG_WEBHOOK_AUTH:
+        print(f"[Top.gg Webhook] Unauthorized request from {request.remote}")
+        return web.Response(status=403, text="Forbidden")
+
+    try:
+        data = await request.json()
+    except Exception:
+        return web.Response(status=400, text="Bad request")
+
+    user_id = data.get("user")
+    vote_type = data.get("type", "upvote")
+    is_test = data.get("test", False)
+
+    if not user_id:
+        return web.Response(status=400, text="Missing user field")
+
+    user_id = int(user_id)
+    print(f"[Top.gg Webhook] Vote received! User: {user_id}, type: {vote_type}, test: {is_test}")
+
+    if is_test:
+        print("[Top.gg Webhook] Test vote — skipping reward & DM")
+        return web.Response(status=200, text="OK (test)")
+
+    # Check if this vote was already auto-claimed (avoid double-reward)
+    now = datetime.now()
+    last_claim = voted_users.get(user_id)
+    if last_claim:
+        last_dt = datetime.fromisoformat(last_claim)
+        if (now - last_dt).total_seconds() < 43200:  # 12 hours
+            print(f"[Top.gg Webhook] User {user_id} already claimed recently — skipping")
+            return web.Response(status=200, text="OK (already claimed)")
+
+    # Award bonus points
+    bonus = 50
+    voted_users[user_id] = now.isoformat()
+    add_points(user_id, bonus)
+    track_user_activity(user_id)
+
+    # Send a thank-you DM
+    if _bot_instance:
+        try:
+            user = _bot_instance.get_user(user_id) or await _bot_instance.fetch_user(user_id)
+            dm_channel = user.dm_channel or await user.create_dm()
+
+            name = user.display_name or user.name
+            msg = random.choice(VOTE_THANK_YOU_MESSAGES)
+            total = get_points(user_id)
+            embed = discord.Embed(
+                title="🗳️ Thanks for voting!",
+                description=f"Hey **{name}**! 💙\n\n{msg}\n\n🎁 **+{bonus} bonus points** awarded!\n💰 Total points: **{total}**\n\nYou can vote again in **12 hours** — every vote helps Rune grow! 🚀",
+                color=discord.Color.from_rgb(255, 0, 119),
+            )
+            embed.set_footer(text="Your votes help Rune reach more servers! 💙")
+            await dm_channel.send(embed=embed)
+            print(f"[Top.gg Webhook] Thank-you DM sent to {user_id}")
+        except discord.Forbidden:
+            print(f"[Top.gg Webhook] Could not DM user {user_id} (DMs disabled)")
+        except Exception as e:
+            print(f"[Top.gg Webhook] Error sending DM to {user_id}: {e}")
+
+    return web.Response(status=200, text="OK")
+
+
+async def _start_webhook_server(bot: commands.Bot) -> None:
+    """Start the aiohttp web server to receive Top.gg webhooks."""
+    global _bot_instance
+    _bot_instance = bot
+
+    if not TOPGG_WEBHOOK_AUTH:
+        print(f"[Top.gg Webhook] ⚠️  TOPGG_WEBHOOK_AUTH not set — webhook server not started")
+        print(f"[Top.gg Webhook]    Set it in .env to enable automatic vote detection!")
+        return
+
+    app = web.Application()
+    app.router.add_post("/api/topgg", _handle_topgg_webhook)
+    async def _health_check(request: web.Request) -> web.Response:
+        return web.Response(text="Rune Top.gg webhook is running! ✅")
+    app.router.add_get("/api/topgg", _health_check)
+
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", WEBHOOK_PORT)
+    try:
+        await site.start()
+        print(f"[Top.gg Webhook] ✅ Webhook server running on port {WEBHOOK_PORT}")
+        print(f"[Top.gg Webhook]    Endpoint: POST /api/topgg")
+    except OSError as e:
+        print(f"[Top.gg Webhook] ❌ Failed to start webhook server on port {WEBHOOK_PORT}: {e}")
+        print(f"[Top.gg Webhook]    Set WEBHOOK_PORT in .env to use a different port")
 
 
 # ╔══════════════════════════════════════════════════════════════════════════════╗
@@ -1293,6 +1409,8 @@ def create_bot():
         if GATEWAY_LOG_CHANNEL_ID:
             print(f"Gateway logging active -> Channel ID: {GATEWAY_LOG_CHANNEL_ID}")
         print(f"OmniRoute endpoint: {OMNIROUTE_BASE_URL}")
+        print(f"Top.gg webhook auth: {'configured ✅' if TOPGG_WEBHOOK_AUTH else 'not set ⚠️'}")
+        await _start_webhook_server(bot)
 
     # ═══════════════════════════════════════════════════════════════════════
     # GATEWAY EVENT HANDLERS

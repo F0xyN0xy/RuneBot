@@ -107,6 +107,9 @@ bot_data.json
 points.json
 stats.json
 
+# Icon
+Icon.png
+
 # ===== MISC =====
 # Backup files
 *.bak
