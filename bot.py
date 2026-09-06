@@ -16,6 +16,9 @@ from aiohttp import web
 from typing import Optional
 from dotenv import load_dotenv
 
+# Announcements system
+from announcements import register_announcement_commands
+
 # NEW: OpenAI client for OmniRoute compatibility
 try:
     from openai import AsyncOpenAI
@@ -2783,6 +2786,9 @@ def create_bot():
             ok = await save_data_async()
             if ok and _jsonbin_working:
                 print("Auto-saved to JSONBin.")
+
+    # Register announcement commands
+    register_announcement_commands(bot)
 
     return bot
 

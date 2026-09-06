@@ -4,6 +4,7 @@
 
 # ===== SENSITIVE FILES (NEVER COMMIT!) =====
 .env
+announcements_config.json
 config.ini
 secrets.json
 *.key
