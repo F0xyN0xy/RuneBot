@@ -652,6 +652,17 @@ async def _start_webhook_server(bot: commands.Bot) -> None:
         return web.Response(text="Rune Top.gg webhook is running! ✅")
     app.router.add_get("/api/topgg", _health_check)
 
+    # Serve the website from index.html
+    async def _serve_website(request: web.Request) -> web.Response:
+        html_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "index.html")
+        try:
+            with open(html_path, "r", encoding="utf-8") as f:
+                html_content = f.read()
+            return web.Response(text=html_content, content_type="text/html")
+        except FileNotFoundError:
+            return web.Response(text="Website coming soon! 🚀", content_type="text/html", status=200)
+    app.router.add_get("/", _serve_website)
+
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, "0.0.0.0", WEBHOOK_PORT)
@@ -2823,7 +2834,7 @@ def create_bot():
             value=(
                 f"⭐ **[Vote on Top.gg]({topgg_url})**\n"
                 f"🌐 **[Website](https://runebot.wispbyte.app)**\n"
-                f"💬 **[Support Server](https://discord.gg/fxyNxy)**\n"
+                f"💬 **[Support Server](https://discord.gg/RpWcRSUhUe)**\n"
                 f"📦 **[Invite Rune](https://discord.com/oauth2/authorize?client_id={TOPGG_BOT_ID if TOPGG_BOT_ID else 'BOT_ID'})**"
             ),
             inline=False,
