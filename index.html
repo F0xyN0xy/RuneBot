@@ -1,0 +1,467 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Rune — a Discord bot worth carving into your server</title>
+<meta name="description" content="Rune is a free Discord bot with trivia, points, AI chat with switchable personas, 24/7 voice, polls, and moderation tools.">
+<meta property="og:title" content="Rune — a Discord bot worth carving into your server">
+<meta property="og:description" content="Trivia, points, AI chat, personas, 24/7 voice, polls and moderation — one bot for your server.">
+<meta property="og:url" content="https://runebot.wispbyte.app">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,340;9..144,440;9..144,560&family=Public+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --bg: #131120;
+    --bg-alt: #1b1830;
+    --panel: #1f1c37;
+    --line: rgba(240,236,225,0.13);
+    --ink: #f0ece1;
+    --ink-dim: #a49fb8;
+    --gold: #e3a552;
+    --gold-dim: #7a6541;
+    --teal: #5fbfae;
+  }
+  *{ box-sizing:border-box; }
+  html{ scroll-behavior:smooth; }
+  body{
+    margin:0;
+    background:var(--bg);
+    color:var(--ink);
+    font-family:'Public Sans', sans-serif;
+    line-height:1.55;
+    -webkit-font-smoothing:antialiased;
+  }
+  h1,h2,h3{
+    font-family:'Fraunces', serif;
+    font-weight:560;
+    letter-spacing:-0.01em;
+    margin:0;
+    color:var(--ink);
+  }
+  p{ margin:0; }
+  a{ color:inherit; }
+  .wrap{
+    max-width:1120px;
+    margin:0 auto;
+    padding:0 32px;
+  }
+  :focus-visible{
+    outline:2px solid var(--gold);
+    outline-offset:3px;
+  }
+
+  /* ---------- top bar ---------- */
+  .topbar{
+    display:flex;
+    align-items:center;
+    justify-content:space-between;
+    padding:28px 32px;
+    max-width:1120px;
+    margin:0 auto;
+  }
+  .wordmark{
+    font-family:'Fraunces', serif;
+    font-size:22px;
+    font-weight:560;
+    display:flex;
+    align-items:center;
+    gap:10px;
+    text-decoration:none;
+  }
+  .wordmark svg{ width:22px; height:22px; }
+  .topbar nav{ display:flex; gap:28px; }
+  .topbar nav a{
+    font-size:15px;
+    color:var(--ink-dim);
+    text-decoration:none;
+  }
+  .topbar nav a:hover{ color:var(--ink); }
+  @media (max-width:640px){ .topbar nav{ display:none; } }
+
+  /* ---------- hero ---------- */
+  .hero{
+    padding:56px 0 96px;
+  }
+  .hero .wrap{
+    display:grid;
+    grid-template-columns:1.15fr 0.85fr;
+    gap:56px;
+    align-items:center;
+  }
+  .hero h1{
+    font-size:clamp(38px, 5.6vw, 64px);
+    line-height:1.06;
+  }
+  .hero p.lede{
+    margin-top:22px;
+    max-width:46ch;
+    font-size:18px;
+    color:var(--ink-dim);
+  }
+  .cta-row{
+    margin-top:34px;
+    display:flex;
+    align-items:center;
+    gap:22px;
+    flex-wrap:wrap;
+  }
+  .btn{
+    display:inline-flex;
+    align-items:center;
+    gap:10px;
+    background:var(--gold);
+    color:#1a1508;
+    font-weight:600;
+    font-size:15px;
+    padding:14px 24px;
+    border-radius:3px;
+    text-decoration:none;
+    border:1px solid var(--gold);
+    transition:background .15s ease, transform .15s ease;
+  }
+  .btn:hover{ background:#f0b869; }
+  .btn:active{ transform:translateY(1px); }
+  .link-quiet{
+    font-size:15px;
+    color:var(--ink-dim);
+    text-decoration:underline;
+    text-decoration-color:var(--line);
+    text-underline-offset:4px;
+  }
+  .link-quiet:hover{ color:var(--ink); text-decoration-color:var(--ink-dim); }
+  .fine-print{
+    margin-top:28px;
+    font-size:13px;
+    color:var(--ink-dim);
+  }
+
+  .sigil-holder{ display:flex; justify-content:center; }
+  .sigil-holder svg{ width:100%; max-width:340px; height:auto; }
+  .glow-line{ animation:flicker 5s ease-in-out infinite; }
+  .glow-dot{ animation:flicker 5s ease-in-out infinite; animation-delay:.4s; }
+  @keyframes flicker{
+    0%, 100% { opacity:.55; }
+    50% { opacity:1; }
+  }
+  @media (prefers-reduced-motion: reduce){
+    .glow-line, .glow-dot{ animation:none; opacity:.85; }
+    html{ scroll-behavior:auto; }
+  }
+  @media (max-width:860px){
+    .hero .wrap{ grid-template-columns:1fr; }
+    .sigil-holder{ order:-1; max-width:220px; margin:0 auto; }
+  }
+
+  /* ---------- section shell ---------- */
+  section{ padding:88px 0; border-top:1px solid var(--line); }
+  .kicker-head{ max-width:56ch; margin-bottom:48px; }
+  .kicker-head h2{ font-size:clamp(28px,3.4vw,38px); }
+  .kicker-head p{ margin-top:14px; font-size:16.5px; color:var(--ink-dim); }
+
+  /* ---------- feature grid ---------- */
+  .feature-grid{
+    display:grid;
+    grid-template-columns:repeat(3, 1fr);
+    gap:1px;
+    background:var(--line);
+    border:1px solid var(--line);
+  }
+  .feature{
+    background:var(--bg);
+    padding:32px 28px;
+  }
+  .feature svg{ width:26px; height:26px; margin-bottom:20px; }
+  .feature h3{ font-size:18px; font-weight:500; margin-bottom:10px; }
+  .feature p{ font-size:14.5px; color:var(--ink-dim); }
+  @media (max-width:860px){ .feature-grid{ grid-template-columns:repeat(2,1fr); } }
+  @media (max-width:560px){ .feature-grid{ grid-template-columns:1fr; } }
+
+  /* ---------- loop section ---------- */
+  .loop{
+    display:grid;
+    grid-template-columns:repeat(4, 1fr);
+    gap:36px;
+  }
+  .loop-step{ position:relative; padding-top:34px; border-top:1px solid var(--gold-dim); }
+  .loop-step .num{
+    font-family:'Fraunces', serif;
+    font-size:15px;
+    color:var(--gold);
+    position:absolute;
+    top:-13px;
+    left:0;
+    background:var(--bg);
+    padding-right:10px;
+  }
+  .loop-step h3{ font-size:16.5px; font-weight:500; margin-bottom:8px; }
+  .loop-step p{ font-size:14.5px; color:var(--ink-dim); }
+  @media (max-width:860px){ .loop{ grid-template-columns:1fr 1fr; row-gap:44px; } }
+  @media (max-width:520px){ .loop{ grid-template-columns:1fr; } }
+
+  /* ---------- ai section ---------- */
+  .ai-section .wrap{
+    display:grid;
+    grid-template-columns:1fr 1fr;
+    gap:64px;
+    align-items:start;
+  }
+  .ai-section h2{ font-size:clamp(26px,3vw,34px); margin-bottom:16px; }
+  .ai-section p{ color:var(--ink-dim); font-size:16px; }
+  .ai-section p + p{ margin-top:14px; }
+  .persona-list{
+    display:flex;
+    flex-wrap:wrap;
+    gap:10px;
+    margin-top:26px;
+  }
+  .persona-chip{
+    border:1px solid var(--line);
+    padding:8px 14px;
+    border-radius:2px;
+    font-size:13.5px;
+    color:var(--ink-dim);
+  }
+  .provider-card{
+    border:1px solid var(--line);
+    padding:28px;
+    background:var(--panel);
+  }
+  .provider-card .flow{
+    display:flex;
+    flex-direction:column;
+    gap:0;
+    font-size:14px;
+    color:var(--ink-dim);
+  }
+  .provider-card .flow-item{
+    padding:14px 0;
+    border-bottom:1px solid var(--line);
+    display:flex;
+    justify-content:space-between;
+    gap:12px;
+  }
+  .provider-card .flow-item:last-child{ border-bottom:none; }
+  .provider-card .flow-item strong{ color:var(--ink); font-weight:500; }
+  @media (max-width:860px){ .ai-section .wrap{ grid-template-columns:1fr; } }
+
+  /* ---------- cta band ---------- */
+  .cta-band{
+    text-align:center;
+    padding:100px 0;
+  }
+  .cta-band h2{
+    font-size:clamp(30px,4.4vw,46px);
+    max-width:20ch;
+    margin:0 auto 20px;
+  }
+  .cta-band p{ color:var(--ink-dim); font-size:16px; margin-bottom:34px; }
+  .cta-band .cta-row{ justify-content:center; }
+
+  /* ---------- footer ---------- */
+  footer{
+    border-top:1px solid var(--line);
+    padding:40px 0;
+  }
+  footer .wrap{
+    display:flex;
+    justify-content:space-between;
+    align-items:center;
+    flex-wrap:wrap;
+    gap:16px;
+  }
+  footer p{ font-size:13.5px; color:var(--ink-dim); }
+  footer .foot-links{ display:flex; gap:22px; }
+  footer .foot-links a{ font-size:13.5px; color:var(--ink-dim); text-decoration:none; }
+  footer .foot-links a:hover{ color:var(--ink); }
+</style>
+</head>
+<body>
+
+<div class="topbar wrap" style="padding-left:0;padding-right:0;">
+  <a class="wordmark" href="#top">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M12 2 L12 22 M6 8 L12 13 L18 8 M6 16 L12 11 L18 16"/></svg>
+    Rune
+  </a>
+  <nav>
+    <a href="#features">Commands</a>
+    <a href="#loop">Points</a>
+    <a href="#ai">AI</a>
+    <a href="https://github.com/F0xyN0xy/RuneBot">Source</a>
+  </nav>
+</div>
+
+<header class="hero" id="top">
+  <div class="wrap">
+    <div>
+      <h1>A bot carved from your server's own chaos.</h1>
+      <p class="lede">Rune brings trivia, points, AI conversation, 24/7 voice, and moderation into one Discord bot — free, and built to keep answering even when one AI provider doesn't.</p>
+      <div class="cta-row">
+        <a class="btn" href="https://discord.com/oauth2/authorize?client_id=1466510489063395453&permissions=1101659335686&integration_type=0&scope=bot+applications.commands" data-role="invite-link">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><path d="M20.3 4.4A19.7 19.7 0 0 0 15.6 3c-.2.4-.5 1-.7 1.4a18 18 0 0 0-5.8 0A11 11 0 0 0 8.4 3a19.7 19.7 0 0 0-4.7 1.4C1 9 .3 13.6.6 18a19.9 19.9 0 0 0 5.7 2.8c.5-.6.8-1.3 1.2-2a12.7 12.7 0 0 1-1.9-.9l.5-.4a14.2 14.2 0 0 0 11.8 0l.5.4c-.6.4-1.2.6-1.9.9.3.7.7 1.4 1.2 2A19.8 19.8 0 0 0 23.4 18c.4-5.1-.9-9.6-3.1-13.6ZM8.5 15.3c-1 0-1.9-1-1.9-2.1s.8-2.1 1.9-2.1 1.9 1 1.9 2.1-.9 2.1-1.9 2.1Zm7 0c-1 0-1.9-1-1.9-2.1s.8-2.1 1.9-2.1 1.9 1 1.9 2.1-.8 2.1-1.9 2.1Z"/></svg>
+          Add Rune to your server
+        </a>
+        <a class="link-quiet" href="https://github.com/F0xyN0xy/RuneBot">Read the source on GitHub</a>
+      </div>
+      <p class="fine-print">Free to use. No premium tier, no paywalled commands.</p>
+    </div>
+    <div class="sigil-holder" aria-hidden="true">
+      <svg viewBox="0 0 200 200" fill="none">
+        <circle cx="100" cy="100" r="92" stroke="var(--line)" stroke-width="1.5"/>
+        <circle class="glow-dot" cx="100" cy="100" r="66" stroke="var(--gold)" stroke-width="1" opacity="0.5"/>
+        <g stroke="var(--gold)" stroke-width="2.4" stroke-linecap="round" class="glow-line">
+          <path d="M100 34 L100 166"/>
+          <path d="M60 60 L100 100 L140 60"/>
+          <path d="M60 140 L100 100 L140 140"/>
+        </g>
+        <g stroke="var(--teal)" stroke-width="1.6" stroke-linecap="round" opacity="0.75">
+          <path d="M40 100 L60 100"/>
+          <path d="M140 100 L160 100"/>
+        </g>
+      </svg>
+    </div>
+  </div>
+</header>
+
+<section id="features">
+  <div class="wrap">
+    <div class="kicker-head">
+      <h2>Everything your server keeps asking for, in one bot.</h2>
+      <p>Eight command categories, all installed at once — no separate bots for trivia, moderation, and AI chat.</p>
+    </div>
+    <div class="feature-grid">
+
+      <div class="feature">
+        <svg viewBox="0 0 24 24" fill="none" stroke="var(--gold)" stroke-width="1.5"><circle cx="12" cy="12" r="9"/><path d="M9 10h.01M15 10h.01M8 15c1 1.3 2.3 2 4 2s3-.7 4-2"/></svg>
+        <h3>Fun & games</h3>
+        <p>Jokes, roasts, compliments, the magic 8-ball, dice, coin flips, and memes pulled from Reddit — the small commands that keep a channel alive between real conversations.</p>
+      </div>
+
+      <div class="feature">
+        <svg viewBox="0 0 24 24" fill="none" stroke="var(--gold)" stroke-width="1.5"><path d="M12 2l2.4 6.9L21 11l-6.6 2.1L12 20l-2.4-6.9L3 11l6.6-2.1z"/></svg>
+        <h3>Trivia & points</h3>
+        <p>Multiple-choice trivia with real buttons, a daily bonus claim, and a leaderboard your whole server competes on. Wager points in duels or send them to a friend.</p>
+      </div>
+
+      <div class="feature">
+        <svg viewBox="0 0 24 24" fill="none" stroke="var(--gold)" stroke-width="1.5"><path d="M4 5h16v11H8l-4 4z"/></svg>
+        <h3>AI chat & personas</h3>
+        <p>Talk to Rune with a message prefix, no slash command needed. Switch its personality per-user — pirate, Shakespeare, robot, sarcastic, cheerful — without changing it for anyone else.</p>
+      </div>
+
+      <div class="feature">
+        <svg viewBox="0 0 24 24" fill="none" stroke="var(--gold)" stroke-width="1.5"><path d="M9 6v12l7-6z"/><circle cx="12" cy="12" r="9.5"/></svg>
+        <h3>Voice</h3>
+        <p>Keep Rune parked in a voice channel 24/7 with auto-reconnect, or hold down push-to-talk for a spoken reply — recorded, transcribed, and answered back in a synthesized voice.</p>
+      </div>
+
+      <div class="feature">
+        <svg viewBox="0 0 24 24" fill="none" stroke="var(--gold)" stroke-width="1.5"><path d="M12 2 4 6v6c0 5 3.4 8.7 8 10 4.6-1.3 8-5 8-10V6z"/></svg>
+        <h3>Moderation</h3>
+        <p>Kick, ban, timeout, and un-timeout members with a proper reason logged — no separate mod bot required for the basics.</p>
+      </div>
+
+      <div class="feature">
+        <svg viewBox="0 0 24 24" fill="none" stroke="var(--gold)" stroke-width="1.5"><path d="M5 20V10M12 20V4M19 20v-7"/></svg>
+        <h3>Polls</h3>
+        <p>Up to four options, live vote counts with visual bars, and the freedom to change a vote — closed only by whoever created it.</p>
+      </div>
+
+      <div class="feature">
+        <svg viewBox="0 0 24 24" fill="none" stroke="var(--gold)" stroke-width="1.5"><path d="M12 3v4M12 17v4M4.2 4.2l2.8 2.8M17 17l2.8 2.8M3 12h4M17 12h4M4.2 19.8 7 17M17 7l2.8-2.8"/></svg>
+        <h3>Utility</h3>
+        <p>Set a reminder in plain minutes, check your own usage stats, or pull up the server info card — the small lookups people ask a bot for daily.</p>
+      </div>
+
+      <div class="feature">
+        <svg viewBox="0 0 24 24" fill="none" stroke="var(--gold)" stroke-width="1.5"><path d="M4 21V10l8-7 8 7v11M9 21v-6h6v6"/></svg>
+        <h3>Top.gg voting</h3>
+        <p>Vote for Rune on Top.gg every 12 hours and claim a points bonus — verified automatically against the Top.gg API.</p>
+      </div>
+
+    </div>
+  </div>
+</section>
+
+<section id="loop">
+  <div class="wrap">
+    <div class="kicker-head">
+      <h2>Points aren't just a number — they're a reason to come back.</h2>
+      <p>The whole point system runs in one loop, and every part of it feeds the next.</p>
+    </div>
+    <div class="loop">
+      <div class="loop-step">
+        <span class="num">01</span>
+        <h3>Answer trivia, claim your daily</h3>
+        <p>Correct trivia answers pay 10 points. A daily claim pays 15–50, picked at random.</p>
+      </div>
+      <div class="loop-step">
+        <span class="num">02</span>
+        <h3>Wager or gift what you've earned</h3>
+        <p>Challenge someone to a coin-flip duel for their points, or just give them away.</p>
+      </div>
+      <div class="loop-step">
+        <span class="num">03</span>
+        <h3>Climb the leaderboard</h3>
+        <p><code style="font-family:inherit;">/leaderboard</code> ranks the top 10 in your server — bragging rights, tracked automatically.</p>
+      </div>
+      <div class="loop-step">
+        <span class="num">04</span>
+        <h3>Vote for a bonus</h3>
+        <p>A Top.gg vote every 12 hours adds another 50 points to the pile, no trivia required.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="ai" class="ai-section">
+  <div class="wrap">
+    <div>
+      <h2>AI chat that keeps working when a provider doesn't.</h2>
+      <p>Rune's conversation is routed through OmniRoute, which automatically switches between AI providers if one is down or rate-limited. If OmniRoute itself has trouble, Groq's Compound model steps in as a second fallback.</p>
+      <p>The result: fewer moments where Rune just stops responding, and no single point of failure for the feature people use most.</p>
+      <p style="margin-top:26px; font-size:14.5px;">Each person can also set their own persona, independent of everyone else in the server:</p>
+      <div class="persona-list">
+        <span class="persona-chip">Default</span>
+        <span class="persona-chip">Sarcastic</span>
+        <span class="persona-chip">Pirate</span>
+        <span class="persona-chip">Shakespeare</span>
+        <span class="persona-chip">Robot</span>
+        <span class="persona-chip">Cheerful</span>
+      </div>
+    </div>
+    <div class="provider-card">
+      <div class="flow">
+        <div class="flow-item"><span>Your message</span><strong>sent to Rune</strong></div>
+        <div class="flow-item"><span>Primary route</span><strong>OmniRoute</strong></div>
+        <div class="flow-item"><span>If unavailable</span><strong>Groq Compound</strong></div>
+        <div class="flow-item"><span>Filtered for</span><strong>toxicity & safety</strong></div>
+        <div class="flow-item"><span>Delivered as</span><strong>text, or voice via TTS</strong></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="cta-band">
+  <div class="wrap">
+    <h2>Give your server something to carve its name into.</h2>
+    <p>Set-up takes about as long as inviting any other bot.</p>
+    <div class="cta-row">
+      <a class="btn" href="https://discord.com/oauth2/authorize?client_id=1466510489063395453&permissions=1101659335686&integration_type=0&scope=bot+applications.commands" data-role="invite-link">Add Rune to your server</a>
+    </div>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap">
+    <p>Rune is an independent project, built and maintained for the Discord community.</p>
+    <div class="foot-links">
+      <a href="https://github.com/F0xyN0xy/RuneBot">GitHub</a>
+      <a href="#top">Back to top</a>
+    </div>
+  </div>
+</footer>
+
+</body>
+</html>

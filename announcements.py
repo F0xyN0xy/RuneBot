@@ -23,7 +23,9 @@ def get_current_version() -> str:
             timeout=5
         )
         if result.returncode == 0:
-            return result.stdout.strip()
+            version = result.stdout.strip()
+            if version:
+                return version
 
         # Fallback to short commit hash
         result = subprocess.run(
@@ -33,11 +35,18 @@ def get_current_version() -> str:
             timeout=5
         )
         if result.returncode == 0:
-            return result.stdout.strip()
+            version = result.stdout.strip()
+            if version:
+                return version
     except Exception as e:
         print(f"[Announcements] Could not get git version: {e}")
 
-    return "unknown"
+    # If git is not available, check if VERSION env var is set
+    env_version = os.getenv("BOT_VERSION", "")
+    if env_version:
+        return env_version
+
+    return "1.2.0"  # Hardcoded fallback
 
 
 def get_commit_message() -> str:

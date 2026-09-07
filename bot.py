@@ -17,7 +17,7 @@ from typing import Optional
 from dotenv import load_dotenv
 
 # Announcements system
-from announcements import register_announcement_commands
+from announcements import register_announcement_commands, get_current_version
 
 # NEW: OpenAI client for OmniRoute compatibility
 try:
@@ -220,6 +220,7 @@ bot_message_count: int            = 0
 
 active_trivia = {}
 reminders     = []
+bot_start_time: Optional[datetime] = None
 
 # ============== PERSONAS =================
 
@@ -567,11 +568,14 @@ async def _handle_topgg_webhook(request: web.Request) -> web.Response:
     """Handle incoming Top.gg vote webhooks."""
     global _bot_instance
 
-    # Validate authorization header
+    # Validate authorization header (Top.gg sends it as plain value, not "Bearer xyz")
     auth_header = request.headers.get("Authorization", "")
     if TOPGG_WEBHOOK_AUTH and auth_header != TOPGG_WEBHOOK_AUTH:
+        # Log for debugging
         print(f"[Top.gg Webhook] Unauthorized request from {request.remote}")
-        return web.Response(status=403, text="Forbidden")
+        print(f"[Top.gg Webhook] Expected: {TOPGG_WEBHOOK_AUTH[:20]}...")
+        print(f"[Top.gg Webhook] Received: {auth_header[:20] if auth_header else '(empty)'}...")
+        return web.Response(status=200, text="OK")  # Return 200 to avoid Top.gg retries
 
     try:
         data = await request.json()
@@ -1395,7 +1399,8 @@ def create_bot():
 
     @bot.event
     async def on_ready():
-        global user_points, user_stats, user_personas, daily_claimed, voted_users, bot_message_count
+        global user_points, user_stats, user_personas, daily_claimed, voted_users, bot_message_count, bot_start_time
+        bot_start_time = datetime.now()
         user_points, user_stats, user_personas, daily_claimed, voted_users, bot_message_count = await load_data_async()
         await gateway_logger.start()
         for g in bot.guilds:
@@ -2738,6 +2743,100 @@ def create_bot():
         await interaction.followup.send(embed=embed)
         track_user_activity(interaction.user.id)
 
+    # ========== ABOUT COMMAND =================
+
+    @bot.tree.command(name="about", description="Learn about Rune Bot ✨")
+    async def about(interaction: discord.Interaction):
+        # Uptime calculation
+        if bot_start_time:
+            uptime_delta = datetime.now() - bot_start_time
+            hours, remainder = divmod(int(uptime_delta.total_seconds()), 3600)
+            minutes, seconds = divmod(remainder, 60)
+            days, hours = divmod(hours, 24)
+            uptime_parts = []
+            if days > 0:
+                uptime_parts.append(f"{days}d")
+            if hours > 0:
+                uptime_parts.append(f"{hours}h")
+            uptime_parts.append(f"{minutes}m {seconds}s")
+            uptime_str = " ".join(uptime_parts)
+        else:
+            uptime_str = "Starting up..."
+
+        # Stats
+        total_users = len(user_points)
+        total_points = sum(user_points.values())
+        total_commands = sum(s["commands_used"] for s in user_stats.values())
+        total_voters = len(voted_users)
+
+        version = get_current_version()
+
+        embed = discord.Embed(
+            title="✨ Rune Bot",
+            description=(
+                "A feature-rich Discord bot powered by **OmniRoute AI** with automatic provider fallback, "
+                "gamification, moderation tools, 24/7 voice support, and more.\n\n"
+                "*Built with ❤️ for the Discord community.*"
+            ),
+            color=discord.Color.from_rgb(255, 0, 119),
+            url="https://runebot.wispbyte.app",
+        )
+        if interaction.guild and interaction.guild.icon:
+            embed.set_thumbnail(url=interaction.guild.icon.url)
+        elif bot.user and bot.user.display_avatar:
+            embed.set_thumbnail(url=bot.user.display_avatar.url)
+
+        # Quick Stats
+        embed.add_field(
+            name="📊 Stats",
+            value=(
+                f"🏠 **{len(bot.guilds)}** servers\n"
+                f"👤 **{total_users}** users\n"
+                f"💬 **{total_commands}** commands used\n"
+                f"🏆 **{total_points:,}** total points\n"
+                f"🗳️ **{total_voters}** voters\n"
+                f"⏱️ Uptime: **{uptime_str}**"
+            ),
+            inline=True,
+        )
+
+        # Key Features
+        embed.add_field(
+            name="🚀 Features",
+            value=(
+                "🤖 **AI Chat** — OmniRoute auto-fallback\n"
+                "🎭 **6 AI Personas** — Custom personalities\n"
+                "🧠 **Trivia & Points** — Earn & compete\n"
+                "🔊 **24/7 Voice** — Always in VC\n"
+                "🛡️ **Moderation** — Kick, ban, mute\n"
+                "📊 **Polls** — Interactive voting\n"
+                "🎙️ **Push-to-Talk** — Voice interaction\n"
+                "🗳️ **Vote Rewards** — +50 pts per vote"
+            ),
+            inline=True,
+        )
+
+        # Links
+        topgg_url = f"https://top.gg/bot/{TOPGG_BOT_ID}/vote" if TOPGG_BOT_ID else "https://top.gg"
+        embed.add_field(
+            name="🔗 Links",
+            value=(
+                f"⭐ **[Vote on Top.gg]({topgg_url})**\n"
+                f"🌐 **[Website](https://runebot.wispbyte.app)**\n"
+                f"💬 **[Support Server](https://discord.gg/fxyNxy)**\n"
+                f"📦 **[Invite Rune](https://discord.com/oauth2/authorize?client_id={TOPGG_BOT_ID if TOPGG_BOT_ID else 'BOT_ID'})**"
+            ),
+            inline=False,
+        )
+
+        embed.set_footer(
+            text=f"Rune v{version} • Powered by OmniRoute",
+            icon_url=bot.user.display_avatar.url if bot.user else None,
+        )
+        await interaction.response.send_message(embed=embed)
+        track_user_activity(interaction.user.id)
+
+
     # ========== HELP COMMAND =================
 
     @bot.tree.command(name="help", description="View all available commands 📖")
@@ -2751,7 +2850,7 @@ def create_bot():
             ("💡 **Inspiration**", "`/advice`, `/quote`, `/activity`"),
             ("🎭 **AI Persona**", "`/persona` — Change how Rune talks to you"),
             ("🛡️ **Moderation**", "`/kick`, `/ban`, `/mute`, `/unmute`, `/resettrivia` *(requires permissions)*"),
-            ("⏰ **Utility**", "`/remind`, `/stats`, `/serverinfo`, `/help`"),
+            ("⏰ **Utility**", "`/remind`, `/stats`, `/serverinfo`, `/about`, `/help`"),
             ("🔊 **Voice 24/7**", "`/247` — Join a VC 24/7 | `/leave247` — Disconnect | `/vcstatus` — Uptime *(Mod only)*"),
             ("🎙️ **Push-to-Talk**", "`/ptt [seconds]` — Speak & Rune replies with TTS | `/stopttt` — Stop recording"),
             ("🗳️ **Vote**", "`/vote` — Vote for Rune | `/checkvote` — Claim **+50 point** reward"),
