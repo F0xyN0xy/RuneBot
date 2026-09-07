@@ -2835,7 +2835,7 @@ def create_bot():
                 f"⭐ **[Vote on Top.gg]({topgg_url})**\n"
                 f"🌐 **[Website](https://runebot.wispbyte.app)**\n"
                 f"💬 **[Support Server](https://discord.gg/RpWcRSUhUe)**\n"
-                f"📦 **[Invite Rune](https://discord.com/oauth2/authorize?client_id={TOPGG_BOT_ID if TOPGG_BOT_ID else 'BOT_ID'})**"
+                f"📦 **[Invite Rune](https://discord.com/oauth2/authorize?client_id=1466510489063395453&permissions=1376540388438&integration_type=0&scope=bot+applications.commands)**"
             ),
             inline=False,
         )
