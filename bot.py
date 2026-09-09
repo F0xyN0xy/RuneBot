@@ -50,6 +50,7 @@ TOPGG_WEBHOOK_AUTH = os.getenv("TOPGG_WEBHOOK_AUTH", "")
 WEBHOOK_PORT   = int(os.getenv("WEBHOOK_PORT", "8080"))
 ZONOS_API_KEY  = os.getenv("ZONOS_API_KEY", "")
 VOTING_ENABLED = os.getenv("VOTING_ENABLED", "true").lower() in ("1", "true", "yes", "on")
+ERROR_WEBHOOK_URL = os.getenv("ERROR_WEBHOOK_URL", "")
 
 # NEW: Gateway logging channel ID (set in .env as GATEWAY_LOG_CHANNEL_ID)
 GATEWAY_LOG_CHANNEL_ID: Optional[int] = None
@@ -260,6 +261,9 @@ PERSONAS = {
         "You are Rune, an extremely cheerful and enthusiastic Discord bot! "
         "Use lots of energy and positivity! One reply only. "
     ),
+    "tsundere": (
+        ""
+    ),
 }
 
 def get_system_prompt(user_id: int) -> str:
@@ -331,6 +335,55 @@ def track_user_activity(user_id: int):
     user_stats[user_id]["commands_used"] += 1
     user_stats[user_id]["last_seen"] = datetime.now()
     mark_dirty()
+
+
+# --- Message chunking ---
+
+DISCORD_MSG_LIMIT = 2000  # safe limit for all bots/servers
+
+def split_message(text: str, limit: int = DISCORD_MSG_LIMIT) -> list[str]:
+    """Split a long message into chunks ≤ *limit* chars, breaking on newlines."""
+    if len(text) <= limit:
+        return [text]
+    chunks: list[str] = []
+    while text:
+        if len(text) <= limit:
+            chunks.append(text)
+            break
+        # try to break at the last newline before the limit
+        cut = text.rfind("\n", 0, limit)
+        if cut <= 0:
+            cut = limit  # hard cut if no newline found
+        chunks.append(text[:cut])
+        text = text[cut:].lstrip("\n")
+    return chunks
+
+
+async def send_long_message(channel, text: str, **kwargs):
+    """Send *text* to *channel*, splitting into multiple messages if needed."""
+    for chunk in split_message(text):
+        await channel.send(chunk, **kwargs)
+
+
+async def send_error_webhook(title: str, body: str):
+    """Post an error report to the configured ERROR_WEBHOOK_URL (if set)."""
+    if not ERROR_WEBHOOK_URL:
+        return
+    # Truncate very long tracebacks to stay under webhook embed limits
+    if len(body) > 3900:
+        body = body[-3900:]  # keep the most relevant part (bottom of traceback)
+    embed = {
+        "title": title,
+        "description": f"```python\n{body}\n```",
+        "color": 0xFF4444,
+        "timestamp": datetime.utcnow().isoformat(),
+    }
+    try:
+        async with aiohttp.ClientSession() as session:
+            await session.post(ERROR_WEBHOOK_URL, json={"embeds": [embed]})
+    except Exception:
+        pass  # don't let webhook failures crash the bot
+
 
 # ========== API FUNCTIONS =================
 
@@ -1475,76 +1528,88 @@ def create_bot():
     async def on_message(message):
         if message.author.bot:
             return
-        if GATEWAY_LOG_CHANNEL_ID and message.guild:
-            data = {
-                "author": {
-                    "id": str(message.author.id),
-                    "username": message.author.name,
-                    "global_name": getattr(message.author, "global_name", None),
-                    "avatar": message.author.avatar.key if message.author.avatar else None,
-                    "bot": message.author.bot,
-                },
-                "content": message.content,
-                "id": str(message.id),
-                "channel_id": str(message.channel.id),
-                "guild_id": str(message.guild.id),
-                "attachments": [{"filename": a.filename, "size": a.size, "url": a.url} for a in message.attachments],
-                "embeds": [{"type": e.type} for e in message.embeds],
-                "mentions": [{"id": str(m.id), "username": m.name} for m in message.mentions],
-                "mention_roles": [str(r.id) for r in message.role_mentions],
-                "mention_everyone": message.mention_everyone,
-            }
-            await gateway_logger.log("MESSAGE_CREATE", data)
-
-        triggers = ['.joke', '.roast', '.trivia', '.meme']
-        if any(word in message.content.lower() for word in triggers):
-            await message.add_reaction('😎')
-
-        mentioned = bot.user is not None and bot.user in message.mentions
-        if not message.content.startswith(PREFIX) and not mentioned:
-            return
-
-        if mentioned:
-            import re as _re
-            user_input = _re.sub(r"<@!?\d+>", "", message.content).strip()
-            if user_input.startswith(PREFIX):
-                user_input = user_input[len(PREFIX):].strip()
-        else:
-            user_input = message.content[len(PREFIX):].strip()
-        if not user_input:
-            return
-
-        track_user_activity(message.author.id)
-
-        if is_toxic(user_input):
-            await message.channel.send("Hey 🙂 let's keep it respectful.")
-            return
-
-        if is_inappropriate(user_input):
-            joke = await get_joke_async()
-            await message.channel.send(f"Let's keep it clean! Here's a joke instead: {joke}")
-            return
-
-        system_prompt = get_system_prompt(message.author.id)
-        async with message.channel.typing():
-            try:
-                reply = await generate_reply(user_input, system_prompt)
-            except Exception:
-                traceback.print_exc()
-                reply = "⚠️ AI crashed. Please try again."
-
-        global bot_message_count
-        bot_message_count += 1
         try:
-            await message.reply(reply, mention_author=True)
-        except Exception:
-            await message.channel.send(reply)
+            if GATEWAY_LOG_CHANNEL_ID and message.guild:
+                data = {
+                    "author": {
+                        "id": str(message.author.id),
+                        "username": message.author.name,
+                        "global_name": getattr(message.author, "global_name", None),
+                        "avatar": message.author.avatar.key if message.author.avatar else None,
+                        "bot": message.author.bot,
+                    },
+                    "content": message.content,
+                    "id": str(message.id),
+                    "channel_id": str(message.channel.id),
+                    "guild_id": str(message.guild.id),
+                    "attachments": [{"filename": a.filename, "size": a.size, "url": a.url} for a in message.attachments],
+                    "embeds": [{"type": e.type} for e in message.embeds],
+                    "mentions": [{"id": str(m.id), "username": m.name} for m in message.mentions],
+                    "mention_roles": [str(r.id) for r in message.role_mentions],
+                    "mention_everyone": message.mention_everyone,
+                }
+                await gateway_logger.log("MESSAGE_CREATE", data)
 
-        if VOTING_ENABLED and bot_message_count % 25 == 0:
-            await asyncio.sleep(1.5)
-            vote_embed = build_vote_embed(TOPGG_BOT_ID)
-            await message.channel.send(random.choice(VOTE_MESSAGES), embed=vote_embed)
-            mark_dirty()
+            triggers = ['.joke', '.roast', '.trivia', '.meme']
+            if any(word in message.content.lower() for word in triggers):
+                await message.add_reaction('😎')
+
+            mentioned = bot.user is not None and bot.user in message.mentions
+            if not message.content.startswith(PREFIX) and not mentioned:
+                return
+
+            if mentioned:
+                import re as _re
+                user_input = _re.sub(r"<@!?\d+>", "", message.content).strip()
+                if user_input.startswith(PREFIX):
+                    user_input = user_input[len(PREFIX):].strip()
+            else:
+                user_input = message.content[len(PREFIX):].strip()
+            if not user_input:
+                return
+
+            track_user_activity(message.author.id)
+
+            if is_toxic(user_input):
+                await message.channel.send("Hey 🙂 let's keep it respectful.")
+                return
+
+            if is_inappropriate(user_input):
+                joke = await get_joke_async()
+                await message.channel.send(f"Let's keep it clean! Here's a joke instead: {joke}")
+                return
+
+            system_prompt = get_system_prompt(message.author.id)
+            async with message.channel.typing():
+                try:
+                    reply = await generate_reply(user_input, system_prompt)
+                except Exception:
+                    tb = traceback.format_exc()
+                    print(tb)
+                    await send_error_webhook("AI Crash", tb)
+                    reply = "⚠️ AI crashed. Please try again."
+
+            global bot_message_count
+            bot_message_count += 1
+            try:
+                await message.reply(reply, mention_author=True)
+            except Exception:
+                try:
+                    await send_long_message(message.channel, reply)
+                except Exception:
+                    tb = traceback.format_exc()
+                    print(tb)
+                    await send_error_webhook("Message Send Failed", tb)
+
+            if VOTING_ENABLED and bot_message_count % 25 == 0:
+                await asyncio.sleep(1.5)
+                vote_embed = build_vote_embed(TOPGG_BOT_ID)
+                await message.channel.send(random.choice(VOTE_MESSAGES), embed=vote_embed)
+                mark_dirty()
+        except Exception:
+            tb = traceback.format_exc()
+            print(tb)
+            await send_error_webhook("on_message crash", tb)
 
     @bot.event
     async def on_member_join(member):
@@ -2604,7 +2669,7 @@ def create_bot():
         persona = user_personas.get(user_id, "You are Rune, a friendly Discord bot. Keep replies short and conversational (1-3 sentences max).")
         reply = await generate_reply(transcript, persona)
         if messageable:
-            await messageable.send(f"🔊 **Rune:** {reply}")
+            await send_long_message(messageable, f"🔊 **Rune:** {reply}")
         vc_session = vc_sessions.get(guild_id)
         if vc_session and vc_session["vc"].is_connected():
             await play_tts_response(vc_session["vc"], reply, messageable)
