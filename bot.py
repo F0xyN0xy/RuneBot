@@ -19,26 +19,27 @@ from dotenv import load_dotenv
 # Announcements system
 from announcements import register_announcement_commands, get_current_version
 
-# NEW: OpenAI client for OmniRoute compatibility
+# Groq client (primary AI provider)
+try:
+    from groq import Groq, AsyncGroq
+except ImportError:
+    Groq = None
+    AsyncGroq = None
+
+# OpenAI client for OpenRouter fallback
 try:
     from openai import AsyncOpenAI
 except ImportError:
     AsyncOpenAI = None
 
-# Groq client for fallback
-try:
-    from groq import Groq
-except ImportError:
-    Groq = None
-
 # ================= LOAD ENV =================
 load_dotenv()
 
 DISCORD_TOKEN  = os.getenv("DISCORD_TOKEN")
-OMNIROUTE_API_KEY = os.getenv("OMNIROUTE_API_KEY", "")
-OMNIROUTE_BASE_URL = os.getenv("OMNIROUTE_BASE_URL", "")
-OMNIROUTE_MODEL = os.getenv("OMNIROUTE_MODEL", "auto")
 GROQ_API_KEY   = os.getenv("GROQ_API_KEY", "")
+GROQ_MODEL     = os.getenv("GROQ_MODEL", "groq/compound")
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
+OPENROUTER_MODEL   = os.getenv("OPENROUTER_MODEL", "google/gemma-2-9b-it:free")
 JSONBIN_API_KEY = os.getenv("JSONBIN_API_KEY", "")
 JSONBIN_BIN_ID  = os.getenv("JSONBIN_BIN_ID", "")
 PREFIX         = os.getenv("PREFIX", ".")
@@ -73,25 +74,29 @@ JSONBIN_HEADERS: dict[str, str] = {
 
 assert DISCORD_TOKEN is not None, "DISCORD_TOKEN is not set in .env!"
 
-# OmniRoute / OpenAI client setup
-if AsyncOpenAI:
-    ai_client = AsyncOpenAI(
-        base_url=OMNIROUTE_BASE_URL,
-        api_key=OMNIROUTE_API_KEY or "omniroute-local-key",
-    )
-else:
-    ai_client = None
-    print("WARNING: openai package not installed. Run: pip install openai")
-
-# Groq client setup (synchronous fallback)
-if Groq and GROQ_API_KEY:
-    groq_client = Groq(api_key=GROQ_API_KEY)
+# ── Groq client (primary) ────────────────────────────────────────────
+if AsyncGroq and GROQ_API_KEY:
+    groq_client = AsyncGroq(api_key=GROQ_API_KEY)
+elif Groq and GROQ_API_KEY:
+    groq_client = Groq(api_key=GROQ_API_KEY)  # sync fallback if async unavailable
+    print("INFO: AsyncGroq not available, using sync Groq client")
 else:
     groq_client = None
     if not GROQ_API_KEY:
-        print("INFO: GROQ_API_KEY not set. Groq fallback disabled.")
+        print("INFO: GROQ_API_KEY not set. Groq disabled.")
     elif not Groq:
         print("WARNING: groq package not installed. Run: pip install groq")
+
+# ── OpenRouter client (fallback / deep thoughts) ────────────────────
+if AsyncOpenAI and OPENROUTER_API_KEY:
+    openrouter_client = AsyncOpenAI(
+        base_url="https://openrouter.ai/api/v1",
+        api_key=OPENROUTER_API_KEY,
+    )
+else:
+    openrouter_client = None
+    if not OPENROUTER_API_KEY:
+        print("INFO: OPENROUTER_API_KEY not set. OpenRouter fallback disabled.")
 
 # ============== PERSISTENT STORAGE (JSONBin + Local Fallback) ==================
 _dirty = False
@@ -453,66 +458,61 @@ async def get_meme():
 async def get_activity_suggestion():
     return random.choice(ACTIVITY_SUGGESTIONS)
 
-# ========== AI REPLY (OmniRoute / OpenAI-compatible) =================
+# ========== AI REPLY (Groq primary + OpenRouter fallback) ==============
 
 async def generate_reply(user_message: str, system_prompt: str) -> str:
-    """Async AI reply — tries OmniRoute first, falls back to Groq direct."""
+    """Async AI reply — tries Groq first (fast), falls back to OpenRouter (deep thoughts)."""
     user_message = user_message[:300]
 
-    # ── Try OmniRoute first ──────────────────────────────────────────────
-    if ai_client is not None:
-        try:
-            completion = await ai_client.chat.completions.create(
-                model=OMNIROUTE_MODEL,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user",   "content": user_message}
-                ],
-                temperature=0.8,
-                max_tokens=800,
-                stop=None,
-            )
-            reply = completion.choices[0].message.content or ""
-            reply = clean_output(reply)
-            return reply if reply else "🤔 I'm not sure how to answer that."
-        except Exception as e:
-            err = str(e)
-            # Broader detection: OmniRoute / OpenAI-style errors often contain
-            # "overloaded", "busy", "unavailable", or HTTP error codes.
-            busy_signals = ["503", "429", "500", "502", "504", "overloaded", "busy",
-                            "unavailable", "timeout", "rate_limit", "too many requests",
-                            "service unavailable", "temporarily unavailable", "down"]
-            is_busy = any(sig in err.lower() for sig in busy_signals)
-            if is_busy:
-                print(f"[OmniRoute fallback] {err[:120]}")
-            elif "413" in err or "rate_limit" in err.lower():
-                print(f"[OmniRate limit] {err[:120]}")
-            else:
-                print(f"[OmniRoute error] {err[:120]}")
-            # Always fall through to Groq on any OmniRoute exception.
-
-    # ── Fallback: Groq direct ────────────────────────────────────────────
+    # ── Try Groq first (fast, primary) ──────────────────────────────────
     if groq_client is not None:
         try:
-            completion = groq_client.chat.completions.create(
-                model="groq/compound",  # Updated to use Groq's Compound model (mixture of agents)
+            if AsyncGroq and isinstance(groq_client, AsyncGroq):
+                completion = await groq_client.chat.completions.create(
+                    model=GROQ_MODEL,
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user",   "content": user_message}
+                    ],
+                    temperature=0.8,
+                    max_tokens=800,
+                )
+            else:
+                # Sync Groq fallback
+                completion = groq_client.chat.completions.create(
+                    model=GROQ_MODEL,
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user",   "content": user_message}
+                    ],
+                    temperature=0.8,
+                    max_tokens=800,
+                )
+            reply = completion.choices[0].message.content or ""
+            reply = clean_output(reply)
+            return reply if reply else "🤔 I'm not sure how to answer that."
+        except Exception as e:
+            err = str(e)
+            print(f"[Groq error] {err[:120]}")
+
+    # ── Fallback: OpenRouter (deep thoughts, secondary) ─────────────────
+    if openrouter_client is not None:
+        try:
+            completion = await openrouter_client.chat.completions.create(
+                model=OPENROUTER_MODEL,
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user",   "content": user_message}
                 ],
                 temperature=0.8,
                 max_tokens=800,
-                stream=False,
-                stop=None,
             )
             reply = completion.choices[0].message.content or ""
             reply = clean_output(reply)
             return reply if reply else "🤔 I'm not sure how to answer that."
         except Exception as e:
             err = str(e)
-            print(f"[Groq fallback error] {err[:120]}")
-            if "413" in err or "rate_limit" in err.lower():
-                return "⏳ All AI providers are busy right now — try again in a moment!"
+            print(f"[OpenRouter error] {err[:120]}")
 
     return "⚠️ AI is temporarily unavailable. Please try again later."
 
@@ -1432,7 +1432,7 @@ def create_bot():
         print(f"Storage: JSONBin={'active' if _jsonbin_working else 'disabled/failed'}, Local file={'enabled'}")
         if GATEWAY_LOG_CHANNEL_ID:
             print(f"Gateway logging active -> Channel ID: {GATEWAY_LOG_CHANNEL_ID}")
-        print(f"OmniRoute endpoint: {OMNIROUTE_BASE_URL}")
+        print(f"AI providers: Groq ({GROQ_MODEL}) + OpenRouter ({OPENROUTER_MODEL})")
         print(f"Top.gg webhook auth: {'configured ✅' if TOPGG_WEBHOOK_AUTH else 'not set ⚠️'}")
         await _start_webhook_server(bot)
 
@@ -1991,15 +1991,110 @@ def create_bot():
         if get_points(user.id) < wager:
             await interaction.response.send_message(f"❌ {user.name} doesn't have enough points to accept this duel!", ephemeral=True)
             return
-        winner = random.choice([challenger, user])
-        loser = user if winner == challenger else challenger
-        user_points[loser.id] = get_points(loser.id) - wager
-        add_points(winner.id, wager)
-        embed = discord.Embed(title="🪙 Coin Flip Duel!", description=(f"{challenger.mention} vs {user.mention} **Wager:** {wager} points 🎉 **{winner.mention} wins!**"), color=discord.Color.gold())
-        embed.add_field(name=f"{winner.name}", value=f"{get_points(winner.id)} pts (+{wager})", inline=True)
-        embed.add_field(name=f"{loser.name}", value=f"{get_points(loser.id)} pts (-{wager})", inline=True)
-        await interaction.response.send_message(embed=embed)
+
+        # Build challenge embed and send with Accept/Decline buttons
+        embed = discord.Embed(
+            title="🪙 Duel Challenge!",
+            description=(
+                f"{challenger.mention} challenges {user.mention} to a coin flip!\n\n"
+                f"**Wager:** {wager} points each"
+            ),
+            color=discord.Color.gold(),
+        )
+        embed.set_footer(text=f"Use {PREFIX}duel to challenge someone • Accept/Decline below")
+
+        view = DuelView(challenger=challenger, target=user, wager=wager)
+        await interaction.response.send_message(embed=embed, view=view)
         track_user_activity(challenger.id)
+
+
+    # ========== DUEL VIEW (Accept / Decline) =================
+
+    class DuelView(discord.ui.View):
+        message: discord.Message | None = None
+
+        def __init__(self, challenger: discord.User, target: discord.User, wager: int):
+            super().__init__(timeout=60)
+            self.challenger = challenger
+            self.target = target
+            self.wager = wager
+            self.resolved = False
+
+        @discord.ui.button(label="✅ Accept", style=discord.ButtonStyle.success)
+        async def accept_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+            if interaction.user.id != self.target.id:
+                await interaction.response.send_message("❌ Only the challenged user can accept!", ephemeral=True)
+                return
+            if self.resolved:
+                await interaction.response.send_message("❌ This duel is already resolved.", ephemeral=True)
+                return
+            self.resolved = True
+
+            # Re-check both have enough points
+            if get_points(self.challenger.id) < self.wager:
+                await interaction.response.send_message(f"❌ {self.challenger.name} no longer has enough points!", ephemeral=True)
+                return
+            if get_points(self.target.id) < self.wager:
+                await interaction.response.send_message(f"❌ You no longer have enough points!", ephemeral=True)
+                return
+
+            # Flip the coin
+            winner = random.choice([self.challenger, self.target])
+            loser = self.target if winner == self.challenger else self.challenger
+            user_points[loser.id] = get_points(loser.id) - self.wager
+            add_points(winner.id, self.wager)
+
+            embed = discord.Embed(
+                title="🪙 Coin Flip Duel!",
+                description=(
+                    f"{self.challenger.mention} vs {self.target.mention}\n"
+                    f"**Wager:** {self.wager} points\n\n"
+                    f"🎉 **{winner.mention} wins!**"
+                ),
+                color=discord.Color.green(),
+            )
+            embed.add_field(name=f"🏆 {winner.name}", value=f"{get_points(winner.id)} pts (+{self.wager})", inline=True)
+            embed.add_field(name=f"😢 {loser.name}", value=f"{get_points(loser.id)} pts (-{self.wager})", inline=True)
+
+            # Disable buttons
+            for child in self.children:
+                child.disabled = True
+            await interaction.response.edit_message(embed=embed, view=self)
+
+        @discord.ui.button(label="❌ Decline", style=discord.ButtonStyle.danger)
+        async def decline_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+            if interaction.user.id != self.target.id:
+                await interaction.response.send_message("❌ Only the challenged user can decline!", ephemeral=True)
+                return
+            if self.resolved:
+                await interaction.response.send_message("❌ This duel is already resolved.", ephemeral=True)
+                return
+            self.resolved = True
+
+            embed = discord.Embed(
+                title="🪙 Duel Declined",
+                description=f"{self.target.mention} declined the duel from {self.challenger.mention}.",
+                color=discord.Color.red(),
+            )
+            for child in self.children:
+                child.disabled = True
+            await interaction.response.edit_message(embed=embed, view=self)
+
+        async def on_timeout(self):
+            if self.resolved:
+                return
+            self.resolved = True
+            embed = discord.Embed(
+                title="🪙 Duel Expired",
+                description=f"{self.target.mention} didn't respond to {self.challenger.mention}'s duel challenge in time.",
+                color=discord.Color.greyple(),
+            )
+            for child in self.children:
+                child.disabled = True
+            try:
+                await self.message.edit(embed=embed, view=self) if self.message else None
+            except Exception:
+                pass
 
 
     # ========== POLL VIEW =================
@@ -2406,19 +2501,26 @@ def create_bot():
     ptt_sessions: dict[int, dict] = {}
 
     async def transcribe_audio(audio_bytes: bytes) -> str:
-        """Send WAV bytes to OmniRoute Whisper-compatible endpoint and return transcribed text."""
-        if ai_client is None:
+        """Send WAV bytes to Groq Whisper endpoint and return transcribed text."""
+        if groq_client is None:
             return ""
         try:
             with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
                 tmp.write(audio_bytes)
                 tmp_path = tmp.name
             with open(tmp_path, "rb") as f:
-                result = await ai_client.audio.transcriptions.create(
-                    model="whisper-1",
-                    file=("audio.wav", f, "audio/wav"),
-                    response_format="text",
-                )
+                if AsyncGroq and isinstance(groq_client, AsyncGroq):
+                    result = await groq_client.audio.transcriptions.create(
+                        model="whisper-large-v3",
+                        file=("audio.wav", f, "audio/wav"),
+                        response_format="text",
+                    )
+                else:
+                    result = groq_client.audio.transcriptions.create(
+                        model="whisper-large-v3",
+                        file=("audio.wav", f, "audio/wav"),
+                        response_format="text",
+                    )
             os.unlink(tmp_path)
             return str(result).strip()
         except Exception as e:
@@ -2683,19 +2785,19 @@ def create_bot():
 
 
     # ========== TEST PROVIDERS COMMAND =================
-    # Tests multiple OmniRoute free providers with increasing message lengths
+    # Tests Groq and OpenRouter providers with increasing message lengths
 
-    @bot.tree.command(name="testproviders", description="Test OmniRoute free providers with different message lengths 🧪")
-    @app_commands.describe(length="Message length: short (50), medium (500), long (2000), max (4000)", model="Specific model to test, or 'auto' for all")
+    @bot.tree.command(name="testproviders", description="Test AI providers with different message lengths 🧪")
+    @app_commands.describe(length="Message length: short (50), medium (500), long (2000), max (4000)")
     @app_commands.choices(length=[
         app_commands.Choice(name="Short (~50 chars)", value="short"),
         app_commands.Choice(name="Medium (~500 chars)", value="medium"),
         app_commands.Choice(name="Long (~2000 chars)", value="long"),
         app_commands.Choice(name="Max (~4000 chars)", value="max"),
     ])
-    async def testproviders(interaction: discord.Interaction, length: str = "short", model: str = "auto"):
-        if ai_client is None:
-            await interaction.response.send_message("⚠️ AI client not available. Install openai: `pip install openai`", ephemeral=True)
+    async def testproviders(interaction: discord.Interaction, length: str = "short"):
+        if groq_client is None and openrouter_client is None:
+            await interaction.response.send_message("⚠️ No AI providers configured. Set GROQ_API_KEY or OPENROUTER_API_KEY.", ephemeral=True)
             return
 
         await interaction.response.defer()
@@ -2709,35 +2811,44 @@ def create_bot():
 
         test_msg = test_messages.get(length, test_messages["short"])
 
-        # Models to test — these are common free-tier models available through OmniRoute
-        models_to_test = [
-            "auto",
-            "gpt-3.5-turbo",
-            "groq/compound",
-            "gemini-1.5-flash",
-            "claude-3-haiku",
-        ] if model == "auto" else [model]
+        # Providers to test
+        providers = []
+        if groq_client is not None:
+            providers.append(("Groq", groq_client, GROQ_MODEL))
+        if openrouter_client is not None:
+            providers.append(("OpenRouter", openrouter_client, OPENROUTER_MODEL))
 
         results = []
 
-        for m in models_to_test:
+        for provider_name, client, model in providers:
             start = time.time()
             try:
-                completion = await ai_client.chat.completions.create(
-                    model=m,
-                    messages=[
-                        {"role": "system", "content": "You are a test bot. Reply very briefly."},
-                        {"role": "user", "content": test_msg[:4000]}
-                    ],
-                    temperature=0.5,
-                    max_tokens=100,
-                )
+                if AsyncGroq and isinstance(client, AsyncGroq):
+                    completion = await client.chat.completions.create(
+                        model=model,
+                        messages=[
+                            {"role": "system", "content": "You are a test bot. Reply very briefly."},
+                            {"role": "user", "content": test_msg[:4000]}
+                        ],
+                        temperature=0.5,
+                        max_tokens=100,
+                    )
+                else:
+                    completion = await client.chat.completions.create(
+                        model=model,
+                        messages=[
+                            {"role": "system", "content": "You are a test bot. Reply very briefly."},
+                            {"role": "user", "content": test_msg[:4000]}
+                        ],
+                        temperature=0.5,
+                        max_tokens=100,
+                    )
                 elapsed = time.time() - start
                 reply = completion.choices[0].message.content or "(empty)"
-                provider = getattr(completion, 'model', m)
+                provider = getattr(completion, 'model', model)
                 results.append({
-                    "model": m,
-                    "provider": provider,
+                    "model": model,
+                    "provider": f"{provider_name} ({provider})",
                     "status": "✅ SUCCESS",
                     "time": f"{elapsed:.2f}s",
                     "reply_preview": reply[:100].replace(chr(10), " "),
@@ -2748,8 +2859,8 @@ def create_bot():
                 elapsed = time.time() - start
                 err = str(e)
                 results.append({
-                    "model": m,
-                    "provider": "N/A",
+                    "model": model,
+                    "provider": f"{provider_name}",
                     "status": f"❌ FAILED ({err[:80]})",
                     "time": f"{elapsed:.2f}s",
                     "reply_preview": "—",
@@ -2759,19 +2870,19 @@ def create_bot():
 
         embed = discord.Embed(
             title=f"🧪 Provider Test Results — {length.upper()} ({len(test_msg)} chars)",
-            description=f"Endpoint: `{OMNIROUTE_BASE_URL}`",
+            description=f"**Primary:** Groq ({GROQ_MODEL})\n**Fallback:** OpenRouter ({OPENROUTER_MODEL})",
             color=discord.Color.blue(),
             timestamp=datetime.now()
         )
 
         for r in results:
             embed.add_field(
-                name=f"{r['status']} {r['model']}",
+                name=f"{r['status']} {r['provider']}",
                 value=f"⏱️ {r['time']} | 📝 {r['tokens_in']}→{r['tokens_out']} chars {r['reply_preview']}",
                 inline=False
             )
 
-        embed.set_footer(text="OmniRoute auto-fallback may route to different providers than requested")
+        embed.set_footer(text="Groq is primary (fast), OpenRouter is fallback (deep thoughts)")
         await interaction.followup.send(embed=embed)
         track_user_activity(interaction.user.id)
 
@@ -2806,7 +2917,7 @@ def create_bot():
         embed = discord.Embed(
             title="✨ Rune Bot",
             description=(
-                "A feature-rich Discord bot powered by **OmniRoute AI** with automatic provider fallback, "
+                "A feature-rich Discord bot powered by **Groq & OpenRouter AI** with automatic provider fallback, "
                 "gamification, moderation tools, 24/7 voice support, and more.\n\n"
                 "*Built with ❤️ for the Discord community.*"
             ),
@@ -2836,7 +2947,7 @@ def create_bot():
         embed.add_field(
             name="🚀 Features",
             value=(
-                "🤖 **AI Chat** — OmniRoute auto-fallback\n"
+                "🤖 **AI Chat** — Groq + OpenRouter auto-fallback\n"
                 "🎭 **6 AI Personas** — Custom personalities\n"
                 "🧠 **Trivia & Points** — Earn & compete\n"
                 "🔊 **24/7 Voice** — Always in VC\n"
@@ -2862,7 +2973,7 @@ def create_bot():
         )
 
         embed.set_footer(
-            text=f"Rune v{version} • Powered by OmniRoute",
+            text=f"Rune v{version} • Powered by Groq + OpenRouter",
             icon_url=bot.user.display_avatar.url if bot.user else None,
         )
         await interaction.response.send_message(embed=embed)
@@ -2886,12 +2997,12 @@ def create_bot():
             ("🔊 **Voice 24/7**", "`/247` — Join a VC 24/7 | `/leave247` — Disconnect | `/vcstatus` — Uptime *(Mod only)*"),
             ("🎙️ **Push-to-Talk**", "`/ptt [seconds]` — Speak & Rune replies with TTS | `/stopttt` — Stop recording"),
             ("🗳️ **Vote**", "`/vote` — Vote for Rune | `/checkvote` — Claim **+50 point** reward"),
-            ("🧪 **Test Providers**", "`/testproviders` — Test OmniRoute free AI providers with different message lengths"),
+            ("🧪 **Test Providers**", "`/testproviders` — Test AI providers with different message lengths"),
             ("💬 **AI Chat**", f"Use `{PREFIX}` prefix to chat with AI (e.g., `{PREFIX}hello`)"),
         ]
         for category, cmds in commands_list:
             embed.add_field(name=category, value=cmds, inline=False)
-        embed.set_footer(text="Powered by OmniRoute — auto-fallback across free AI providers 🚀")
+        embed.set_footer(text="Powered by Groq + OpenRouter — fast & reliable AI 🚀")
         await interaction.response.send_message(embed=embed)
 
     # ========== BACKGROUND TASKS =================
@@ -2940,6 +3051,6 @@ def run_forever():
 # ============== START =====================
 
 if __name__ == "__main__":
-    print("🚀 Starting Rune Bot with OmniRoute...")
-    print("📡 Make sure OmniRoute is running: npm install -g omniroute && omniroute")
+    print("🚀 Starting Rune Bot with Groq + OpenRouter...")
+    print(f"📡 AI providers: Groq ({GROQ_MODEL}) + OpenRouter ({OPENROUTER_MODEL})")
     run_forever()

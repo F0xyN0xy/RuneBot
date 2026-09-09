@@ -46,7 +46,7 @@ def get_current_version() -> str:
     if env_version:
         return env_version
 
-    return "1.2.0"  # Hardcoded fallback
+    return "1.3.0"  # Hardcoded fallback
 
 
 def get_commit_message() -> str:

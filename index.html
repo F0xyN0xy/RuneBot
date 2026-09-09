@@ -419,7 +419,7 @@
   <div class="wrap">
     <div>
       <h2>AI chat that keeps working when a provider doesn't.</h2>
-      <p>Rune's conversation is routed through OmniRoute, which automatically switches between AI providers if one is down or rate-limited. If OmniRoute itself has trouble, Groq's Compound model steps in as a second fallback.</p>
+      <p>Rune's conversation is powered by Groq (fast responses) with OpenRouter as a fallback for deeper reasoning. If Groq is rate-limited, OpenRouter steps in automatically to keep Rune responding.</p>
       <p>The result: fewer moments where Rune just stops responding, and no single point of failure for the feature people use most.</p>
       <p style="margin-top:26px; font-size:14.5px;">Each person can also set their own persona, independent of everyone else in the server:</p>
       <div class="persona-list">
@@ -434,8 +434,8 @@
     <div class="provider-card">
       <div class="flow">
         <div class="flow-item"><span>Your message</span><strong>sent to Rune</strong></div>
-        <div class="flow-item"><span>Primary route</span><strong>OmniRoute</strong></div>
-        <div class="flow-item"><span>If unavailable</span><strong>Groq Compound</strong></div>
+        <div class="flow-item"><span>Primary route</span><strong>Groq Compound</strong></div>
+        <div class="flow-item"><span>If unavailable</span><strong>OpenRouter (free models)</strong></div>
         <div class="flow-item"><span>Filtered for</span><strong>toxicity & safety</strong></div>
         <div class="flow-item"><span>Delivered as</span><strong>text, or voice via TTS</strong></div>
       </div>

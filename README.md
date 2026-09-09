@@ -1,6 +1,6 @@
 # 🤖 Rune Discord Bot
 
-A feature-rich Discord bot powered by OmniRoute AI with automatic provider fallback, extensive gamification, moderation tools, 24/7 voice support, and push-to-talk voice interaction.
+A feature-rich Discord bot powered by Groq & OpenRouter AI with automatic provider fallback, extensive gamification, moderation tools, 24/7 voice support, and push-to-talk voice interaction.
 
 ## ✨ Features Overview
 
@@ -51,9 +51,9 @@ A feature-rich Discord bot powered by OmniRoute AI with automatic provider fallb
 
 ### 💬 AI Chat
 - Use `.` prefix to chat with AI (e.g., `.hello`, `.tell me a story`)
-- Powered by **OmniRoute** with automatic fallback (GPT, Groq, Gemini, Claude)
-- Primary: OmniRoute models
-- Fallback: Groq Compound (mixture of agents)
+- Powered by **Groq** (fast) with **OpenRouter** fallback (deep reasoning)
+- Primary: Groq Compound (mixture of agents)
+- Fallback: OpenRouter free models
 - Multi-language support
 - Context-aware responses
 - Toxicity and inappropriate content filtering
@@ -93,7 +93,7 @@ A feature-rich Discord bot powered by OmniRoute AI with automatic provider fallb
 - Automatic vote verification via Top.gg API
 
 ### 🧪 Testing & Debugging
-- **`/testproviders [length] [model]`** - Test OmniRoute AI providers
+- **`/testproviders [length]`** - Test AI providers (Groq + OpenRouter)
 - Test different message lengths (short/medium/long/max)
 - Test specific models or all available ones
 - View response times and success rates
@@ -116,24 +116,13 @@ Required packages:
 - `discord.py` - Discord bot framework
 - `aiohttp` - Async HTTP requests
 - `python-dotenv` - Environment variable management
-- `openai` - OpenAI-compatible API client (for OmniRoute)
-- `groq` - Groq API client (fallback)
+- `openai` - OpenAI-compatible API client (for OpenRouter)
+- `groq` - Groq API client (primary AI provider)
 
 Optional:
 - `discord-ext-voice-recv` - For push-to-talk audio capture (in development)
 
-### 2. Install OmniRoute
-
-OmniRoute provides automatic AI provider fallback:
-
-```bash
-npm install -g omniroute
-omniroute
-```
-
-Or use a hosted OmniRoute instance.
-
-### 3. Configure Environment Variables
+### 2. Configure Environment Variables
 
 Create a `.env` file in the project root:
 
@@ -141,13 +130,13 @@ Create a `.env` file in the project root:
 # Required
 DISCORD_TOKEN=your_discord_bot_token_here
 
-# OmniRoute Configuration
-OMNIROUTE_API_KEY=your_omniroute_key
-OMNIROUTE_BASE_URL=http://localhost:3000/v1
-OMNIROUTE_MODEL=auto
-
-# Groq Fallback
+# Groq (Primary AI Provider)
 GROQ_API_KEY=your_groq_api_key
+GROQ_MODEL=groq/compound
+
+# OpenRouter (Fallback / Deep Thoughts)
+OPENROUTER_API_KEY=your_openrouter_api_key
+OPENROUTER_MODEL=google/gemma-2-9b-it:free
 
 # Storage (JSONBin + Local Fallback)
 JSONBIN_API_KEY=your_jsonbin_api_key
@@ -201,8 +190,8 @@ The bot features auto-restart on crash with configurable delay.
 
 | Feature | API | Documentation |
 |---------|-----|---------------|
-| AI Chat | OmniRoute | Auto-routes to best available provider |
-| AI Fallback | Groq Compound | https://groq.com/ |
+| AI Chat | Groq Compound | https://groq.com/ (fast, primary) |
+| AI Fallback | OpenRouter | https://openrouter.ai/ (deep reasoning) |
 | Jokes | JokeAPI | https://v2.jokeapi.dev/ |
 | Trivia | Open Trivia DB | https://opentdb.com/ |
 | Cat Facts | Cat Facts API | https://catfact.ninja/ |
@@ -211,10 +200,10 @@ The bot features auto-restart on crash with configurable delay.
 | Quotes | ZenQuotes | https://zenquotes.io/ |
 | Memes | Meme API | https://github.com/D3vd/Meme_Api |
 | Voting | Top.gg API | https://top.gg/api/docs |
-| Speech-to-Text | Whisper (via OmniRoute) | OpenAI-compatible endpoint |
+| Speech-to-Text | Whisper (via Groq) | https://groq.com/ |
 | Text-to-Speech | Zonos | https://www.zyphra.com/ |
 
-Most APIs are **free** and require **no API keys** (except OmniRoute, Groq, Top.gg, and Zonos for optional features).
+Most APIs are **free** and require **no API keys** (except Groq, OpenRouter, Top.gg, and Zonos for optional features).
 
 ## 💾 Data Storage
 
@@ -240,8 +229,8 @@ Most APIs are **free** and require **no API keys** (except OmniRoute, Groq, Top.
 - **Safe for All Ages**: Family-friendly responses
 
 ### AI Features
-- **OmniRoute Integration**: Automatic provider fallback for maximum uptime
-- **Groq Compound Fallback**: Uses mixture of agents for reliability
+- **Groq Primary**: Fast AI responses with Compound model (mixture of agents)
+- **OpenRouter Fallback**: Deep reasoning with free models when Groq is unavailable
 - **Smart Response Generation**: Context-aware, conversational
 - **Multi-language Support**: Responds in user's language
 - **Rate Limit Handling**: Graceful fallback on provider overload
@@ -299,10 +288,10 @@ __pycache__/
 - Verify Message Content intent is enabled
 
 ### AI responses are slow or failing
-- Check OmniRoute is running (`omniroute` command)
-- Verify `OMNIROUTE_BASE_URL` is correct
-- Groq fallback activates automatically on OmniRoute failure
-- Check API keys are valid
+- Check `GROQ_API_KEY` is valid in `.env`
+- OpenRouter fallback activates automatically on Groq failure
+- Check `OPENROUTER_API_KEY` is valid for fallback
+- Use `/testproviders` to diagnose provider issues
 
 ### Voice features don't work
 - Requires FFmpeg installed on system
@@ -341,8 +330,8 @@ __pycache__/
 ## 📝 Recent Updates
 
 ### Latest Version (2026-08-30)
-- ✅ Migrated to **OmniRoute** for AI with automatic provider fallback
-- ✅ Added **Groq Compound** as secondary fallback
+- ✅ Migrated to **Groq + OpenRouter** for AI (removed OmniRoute dependency)
+- ✅ **Groq Compound** as primary, **OpenRouter** as fallback
 - ✅ Dual storage system (JSONBin + local fallback)
 - ✅ Gateway event logging with rich embeds
 - ✅ Push-to-talk voice interaction with TTS responses
@@ -379,8 +368,8 @@ For issues:
 
 ## 🎉 Credits
 
-- **OmniRoute** - AI provider auto-routing
-- **Groq** - Fast AI inference
+- **Groq** - Fast AI inference (primary provider)
+- **OpenRouter** - AI provider fallback
 - **Discord.py** - Bot framework
 - Various free APIs for content
 - **Zonos** - Text-to-speech
