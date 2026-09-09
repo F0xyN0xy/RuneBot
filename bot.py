@@ -48,6 +48,7 @@ TOPGG_BOT_ID   = os.getenv("TOPGG_BOT_ID", "")
 TOPGG_WEBHOOK_AUTH = os.getenv("TOPGG_WEBHOOK_AUTH", "")
 WEBHOOK_PORT   = int(os.getenv("WEBHOOK_PORT", "8080"))
 ZONOS_API_KEY  = os.getenv("ZONOS_API_KEY", "")
+VOTING_ENABLED = os.getenv("VOTING_ENABLED", "true").lower() in ("1", "true", "yes", "on")
 
 # NEW: Gateway logging channel ID (set in .env as GATEWAY_LOG_CHANNEL_ID)
 GATEWAY_LOG_CHANNEL_ID: Optional[int] = None
@@ -227,36 +228,32 @@ bot_start_time: Optional[datetime] = None
 PERSONAS = {
     "default": (
         "You are Rune, a helpful and friendly Discord bot. "
-        "Reply with ONE short, friendly message. "
+        "Reply with ONE friendly message, keep it short for small talk. "
+        "For math, code or explanations you MAY be longer and use steps. "
+        "Never stop right after a colon, always finish the explanation. "
+        "Do not start your answer with a label unless asked. "
         "Do NOT create dialogue or invent user messages. "
-        "Stop immediately after your reply. "
-        "Always reply in the same language the user is writing in. "
         "Be helpful, witty, and engaging."
     ),
     "sarcastic": (
         "You are Rune, a sarcastic Discord bot who always replies with dry humor and wit. "
         "Keep it short, one reply only. Never break character. "
-        "Always reply in the same language the user is writing in."
     ),
     "pirate": (
         "You are Rune, a pirate Discord bot. Speak like a pirate at all times! "
         "Keep replies short and swashbuckling. One reply only. "
-        "Always reply in the same language the user is writing in."
     ),
     "shakespeare": (
         "You are Rune, a Discord bot who speaks in the style of Shakespeare. "
         "Use old English, be poetic but brief. One reply only. "
-        "Always reply in the same language the user is writing in."
     ),
     "robot": (
         "You are Rune, a robot Discord bot. Speak in a very robotic, logical, and emotionless manner. "
         "Use technical language. One reply only. "
-        "Always reply in the same language the user is writing in."
     ),
     "cheerful": (
         "You are Rune, an extremely cheerful and enthusiastic Discord bot! "
         "Use lots of energy and positivity! One reply only. "
-        "Always reply in the same language the user is writing in."
     ),
 }
 
@@ -304,11 +301,17 @@ def is_inappropriate(text):
 def clean_output(text: str) -> str:
     if not text:
         return ""
-    text = text.split("\n")[0]
-    for forbidden in ["user:", "assistant:", "bot:"]:
-        if forbidden in text.lower():
-            text = text.lower().split(forbidden)[0]
-    return text.strip()
+    import re
+    role_pat = re.compile(r"^\s*(user|assistant|system|bot|rune)\s*:", re.IGNORECASE)
+    lines: list[str] = []
+    for i, line in enumerate(text.strip().splitlines()):
+        if role_pat.match(line):
+            if i == 0:
+                lines.append(role_pat.sub("", line, count=1))
+                continue
+            break
+        lines.append(line)
+    return "\n".join(lines).strip()
 
 def add_points(user_id: int, points: int = 1):
     user_points[user_id] = user_points.get(user_id, 0) + points
@@ -466,7 +469,8 @@ async def generate_reply(user_message: str, system_prompt: str) -> str:
                     {"role": "user",   "content": user_message}
                 ],
                 temperature=0.8,
-                max_tokens=200,
+                max_tokens=800,
+                stop=None,
             )
             reply = completion.choices[0].message.content or ""
             reply = clean_output(reply)
@@ -497,8 +501,9 @@ async def generate_reply(user_message: str, system_prompt: str) -> str:
                     {"role": "user",   "content": user_message}
                 ],
                 temperature=0.8,
-                max_tokens=200,
+                max_tokens=800,
                 stream=False,
+                stop=None,
             )
             reply = completion.choices[0].message.content or ""
             reply = clean_output(reply)
@@ -1495,10 +1500,17 @@ def create_bot():
         if any(word in message.content.lower() for word in triggers):
             await message.add_reaction('😎')
 
-        if not message.content.startswith(PREFIX):
+        mentioned = bot.user is not None and bot.user in message.mentions
+        if not message.content.startswith(PREFIX) and not mentioned:
             return
 
-        user_input = message.content[len(PREFIX):].strip()
+        if mentioned:
+            import re as _re
+            user_input = _re.sub(r"<@!?\d+>", "", message.content).strip()
+            if user_input.startswith(PREFIX):
+                user_input = user_input[len(PREFIX):].strip()
+        else:
+            user_input = message.content[len(PREFIX):].strip()
         if not user_input:
             return
 
@@ -1523,9 +1535,12 @@ def create_bot():
 
         global bot_message_count
         bot_message_count += 1
-        await message.channel.send(reply)
+        try:
+            await message.reply(reply, mention_author=True)
+        except Exception:
+            await message.channel.send(reply)
 
-        if bot_message_count % 25 == 0:
+        if VOTING_ENABLED and bot_message_count % 25 == 0:
             await asyncio.sleep(1.5)
             vote_embed = build_vote_embed(TOPGG_BOT_ID)
             await message.channel.send(random.choice(VOTE_MESSAGES), embed=vote_embed)
@@ -2339,6 +2354,9 @@ def create_bot():
 
     @bot.tree.command(name="checkvote", description="Claim your Top.gg vote reward! 🗳️")
     async def checkvote(interaction: discord.Interaction):
+        if not VOTING_ENABLED:
+            await interaction.response.send_message("🗳️ Voting is disabled on this bot.", ephemeral=True)
+            return
         await interaction.response.defer(ephemeral=True)
         uid = interaction.user.id
         vote_url = f"https://top.gg/bot/{TOPGG_BOT_ID}/vote" if TOPGG_BOT_ID else "https://top.gg"
@@ -2375,6 +2393,9 @@ def create_bot():
 
     @bot.tree.command(name="vote", description="Vote for Rune on Top.gg and earn bonus points! 🗳️")
     async def vote(interaction: discord.Interaction):
+        if not VOTING_ENABLED:
+            await interaction.response.send_message("🗳️ Voting is disabled on this bot.", ephemeral=True)
+            return
         vote_url = f"https://top.gg/bot/{TOPGG_BOT_ID}/vote" if TOPGG_BOT_ID else "https://top.gg"
         embed = build_vote_embed(TOPGG_BOT_ID)
         await interaction.response.send_message(f"Thanks for supporting Rune! 💙 After voting, use `/checkvote` to claim your **+50 points**!", embed=embed)
